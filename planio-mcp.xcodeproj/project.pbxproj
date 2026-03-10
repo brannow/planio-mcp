@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5FEF831D2F604342007884AA /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 5FEF831C2F604342007884AA /* MCP */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXCopyFilesBuildPhase section */
 		5FEF830A2F60429A007884AA /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
@@ -35,6 +39,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5FEF831D2F604342007884AA /* MCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,6 +82,7 @@
 			);
 			name = "planio-mcp";
 			packageProductDependencies = (
+				5FEF831C2F604342007884AA /* MCP */,
 			);
 			productName = "planio-mcp";
 			productReference = 5FEF830C2F60429A007884AA /* planio-mcp */;
@@ -106,6 +112,9 @@
 			);
 			mainGroup = 5FEF83032F604299007884AA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5FEF831B2F604342007884AA /* XCRemoteSwiftPackageReference "swift-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5FEF830D2F60429A007884AA /* Products */;
 			projectDirPath = "";
@@ -295,6 +304,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5FEF831B2F604342007884AA /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5FEF831C2F604342007884AA /* MCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5FEF831B2F604342007884AA /* XCRemoteSwiftPackageReference "swift-sdk" */;
+			productName = MCP;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 5FEF83042F604299007884AA /* Project object */;
 }

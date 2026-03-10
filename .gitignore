@@ -1,0 +1,6 @@
+.env
+old_test/
+.DS_Store
+xcuserdata/
+.claude/settings.local.json
+docs/
