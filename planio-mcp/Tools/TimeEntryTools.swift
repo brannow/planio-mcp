@@ -23,7 +23,8 @@ enum TimeEntryTools {
 
     private static func listTimeEntries(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
         var query: [String: String] = [:]
-        if let projectId = p.optionalInt("project_id") { query["project_id"] = String(projectId) }
+        if let projectId = p.optionalStringOrInt("project_id") { query["project_id"] = projectId }
+        if let issueId = p.optionalInt("issue_id") { query["issue_id"] = String(issueId) }
         if let userId = p.optionalInt("user_id") { query["user_id"] = String(userId) }
         if let from = p.optionalString("from") { query["from"] = from }
         if let to = p.optionalString("to") { query["to"] = to }
@@ -45,22 +46,40 @@ enum TimeEntryTools {
 
     private static func createTimeEntry(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
         let hours = try p.requireDouble("hours")
-        let activityId = try p.requireInt("activity_id")
+
+        // Determine project context for activity resolution
+        let issueId = p.optionalInt("issue_id")
+        let projectIdRaw = p.optionalStringOrInt("project_id")
+
+        guard issueId != nil || projectIdRaw != nil else {
+            return .init(content: [.text("Either issue_id or project_id is required.")], isError: true)
+        }
+
+        // Resolve numeric project ID for metadata lookups (activity resolution)
+        let resolvedProjectId: Int?
+        if let projectIdRaw, let pid = Int(projectIdRaw) {
+            resolvedProjectId = pid
+        } else if let issueId {
+            let issueData = try await client.getIssue(id: issueId)
+            let issueResponse = try JSONDecoder().decode(IssueResponse.self, from: issueData)
+            resolvedProjectId = issueResponse.issue.project?.id
+        } else {
+            resolvedProjectId = nil
+        }
+
+        // Resolve activity by name or ID
+        guard let activityRaw = p.optionalStringOrInt("activity_id") else {
+            return .init(content: [.text("Missing required parameter: activity_id")], isError: true)
+        }
+        let activityId = try await NameResolver.resolve(activityRaw, field: .activity, projectId: resolvedProjectId, client: client)
 
         var entryData: [String: Any] = [
             "hours": hours,
             "activity_id": activityId
         ]
 
-        // Either issue_id or project_id required
-        if let issueId = p.optionalInt("issue_id") {
-            entryData["issue_id"] = issueId
-        } else if let projectId = p.optionalInt("project_id") {
-            entryData["project_id"] = projectId
-        } else {
-            return .init(content: [.text("Either issue_id or project_id is required.")], isError: true)
-        }
-
+        if let issueId { entryData["issue_id"] = issueId }
+        if let projectIdRaw { entryData["project_id"] = Int(projectIdRaw) ?? projectIdRaw as Any }
         if let spentOn = p.optionalString("spent_on") { entryData["spent_on"] = spentOn }
         if let comments = p.optionalString("comments") { entryData["comments"] = comments }
 
@@ -78,7 +97,26 @@ enum TimeEntryTools {
             path: "/time_entries",
             body: ["time_entry": entryData]
         )
-        return .init(content: [.text("Time entry created successfully.\n\n\(ResponseFormatter.formatTimeEntryDetail(response.timeEntry))")])
+
+        var output = "Time entry created successfully.\n\n\(ResponseFormatter.formatTimeEntryDetail(response.timeEntry))"
+
+        // Phase 3: Time budget context after booking against an issue
+        if let issueId {
+            await client.invalidateIssueCache(id: issueId)
+            if let issueData = try? await client.getIssue(id: issueId),
+               let issueResponse = try? JSONDecoder().decode(IssueResponse.self, from: issueData) {
+                let issue = issueResponse.issue
+                if let spent = issue.spentHours, spent > 0 {
+                    if let est = issue.estimatedHours, est > 0 {
+                        output += "\n\nIssue #\(issueId) time: \(String(format: "%.1f", spent))h of \(String(format: "%.1f", est))h"
+                    } else {
+                        output += "\n\nIssue #\(issueId) time: \(String(format: "%.1f", spent))h spent"
+                    }
+                }
+            }
+        }
+
+        return .init(content: [.text(output)])
     }
 
     private static func updateTimeEntry(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
@@ -86,9 +124,14 @@ enum TimeEntryTools {
 
         var entryData: [String: Any] = [:]
         if let hours = p.optionalDouble("hours") { entryData["hours"] = hours }
-        if let activityId = p.optionalInt("activity_id") { entryData["activity_id"] = activityId }
+        // Resolve activity by name — use project_id if available for context
+        if let activityRaw = p.optionalStringOrInt("activity_id") {
+            let projectIdInt = p.optionalStringOrInt("project_id").flatMap { Int($0) }
+            let activityId = try await NameResolver.resolve(activityRaw, field: .activity, projectId: projectIdInt, client: client)
+            entryData["activity_id"] = activityId
+        }
         if let issueId = p.optionalInt("issue_id") { entryData["issue_id"] = issueId }
-        if let projectId = p.optionalInt("project_id") { entryData["project_id"] = projectId }
+        if let projectIdRaw = p.optionalStringOrInt("project_id") { entryData["project_id"] = Int(projectIdRaw) ?? projectIdRaw as Any }
         if let spentOn = p.optionalString("spent_on") { entryData["spent_on"] = spentOn }
         if let comments = p.optionalString("comments") { entryData["comments"] = comments }
 

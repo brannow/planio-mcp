@@ -33,8 +33,8 @@ await server.withMethodHandler(CallTool.self) { params in
         switch params.name {
         // Issues
         case "list_issues", "get_issue", "create_issue", "update_issue",
-             "delete_issue", "add_watcher", "remove_watcher":
-            return try await IssueTools.handle(params, client: planioClient, features: features)
+             "delete_issue", "add_watcher", "remove_watcher", "bulk_get_issues":
+            return try await IssueTools.handle(params, client: planioClient, server: server, features: features)
 
         // Time Entries
         case "list_time_entries", "get_time_entry", "create_time_entry",

@@ -67,6 +67,16 @@ struct ToolParams {
         args?[key]?.doubleValue
     }
 
+    func optionalStringOrInt(_ key: String) -> String? {
+        guard let val = args?[key] else { return nil }
+        switch val {
+        case .string(let s): return s
+        case .int(let i): return String(i)
+        case .double(let d): return String(Int(d))
+        default: return nil
+        }
+    }
+
     func optionalBool(_ key: String) -> Bool? {
         args?[key]?.boolValue
     }
@@ -77,6 +87,13 @@ struct ToolParams {
 
     func optionalArray(_ key: String) -> [Value]? {
         args?[key]?.arrayValue
+    }
+
+    func requireIntArray(_ key: String) throws -> [Int] {
+        guard let arr = optionalArray(key) else {
+            throw ToolError.missingParam(key)
+        }
+        return arr.compactMap { $0.intValue }
     }
 }
 

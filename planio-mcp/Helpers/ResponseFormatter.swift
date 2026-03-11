@@ -31,7 +31,13 @@ enum ResponseFormatter {
         if let tracker = issue.tracker?.name { meta.append("Tracker: \(tracker)") }
         if let assignee = issue.assignedTo?.name { meta.append("Assigned: \(assignee)") }
         if let version = issue.fixedVersion?.name { meta.append("Sprint: \(version)") }
-        if let due = issue.dueDate { meta.append("Due: \(due)") }
+        if let due = issue.dueDate {
+            if issue.closedOn == nil, let warning = Self.dueDateWarning(due) {
+                meta.append(warning)
+            } else {
+                meta.append("Due: \(due)")
+            }
+        }
 
         var result = parts.joined(separator: " ")
         if !meta.isEmpty {
@@ -40,12 +46,12 @@ enum ResponseFormatter {
         return result
     }
 
-    static func formatIssueDetail(_ issue: Issue, features: Features = .default) -> String {
+    static func formatIssueDetail(_ issue: Issue, features: Features = .default, filter: IssueFilterOptions = .default) -> String {
         var lines: [String] = []
         lines.append("# Issue #\(issue.id): \(issue.subject ?? "No subject")")
         lines.append("")
 
-        // Core fields
+        // Core fields — always rendered
         if let project = issue.project?.name { lines.append("Project: \(project)") }
         if let tracker = issue.tracker?.name { lines.append("Tracker: \(tracker)") }
         if let status = issue.status?.name { lines.append("Status: \(status)") }
@@ -56,39 +62,52 @@ enum ResponseFormatter {
         if let category = issue.category?.name { lines.append("Category: \(category)") }
         if let parent = issue.parent { lines.append("Parent: #\(parent.id)") }
 
-        // Dates
-        if let start = issue.startDate { lines.append("Start date: \(start)") }
-        if let due = issue.dueDate { lines.append("Due date: \(due)") }
-        if let done = issue.doneRatio { lines.append("Done: \(done)%") }
-
-        // Hours
-        if let est = issue.estimatedHours { lines.append("Estimated: \(est)h") }
-        if let spent = issue.spentHours { lines.append("Spent: \(spent)h") }
-
-        // Timestamps
-        if let created = issue.createdOn { lines.append("Created: \(created)") }
-        if let updated = issue.updatedOn { lines.append("Updated: \(updated)") }
-        if let closed = issue.closedOn { lines.append("Closed: \(closed)") }
-
-        // Description
-        if let desc = issue.description, !desc.isEmpty {
-            lines.append("")
-            lines.append("## Description")
-            lines.append(desc)
-        }
-
-        // Custom fields
-        if let fields = issue.customFields, !fields.isEmpty {
-            lines.append("")
-            lines.append("## Custom Fields")
-            for field in fields {
-                let val = field.value?.asString ?? "(empty)"
-                lines.append("- \(field.name ?? "Field \(field.id)"): \(val)")
+        // Due date warning (non-closed issues only)
+        if let dueDateStr = issue.dueDate, issue.closedOn == nil {
+            if let warning = Self.dueDateWarning(dueDateStr) {
+                lines.append(warning)
             }
         }
 
-        // Checklists (requires plugin)
-        if features.checklists {
+        // Dates
+        if filter.shouldInclude("dates") {
+            if let start = issue.startDate { lines.append("Start date: \(start)") }
+            if let due = issue.dueDate { lines.append("Due date: \(due)") }
+            if let done = issue.doneRatio { lines.append("Done: \(done)%") }
+            if let created = issue.createdOn { lines.append("Created: \(created)") }
+            if let updated = issue.updatedOn { lines.append("Updated: \(updated)") }
+            if let closed = issue.closedOn { lines.append("Closed: \(closed)") }
+        }
+
+        // Hours
+        if filter.shouldInclude("hours") {
+            if let est = issue.estimatedHours { lines.append("Estimated: \(est)h") }
+            if let spent = issue.spentHours { lines.append("Spent: \(spent)h") }
+        }
+
+        // Description
+        if filter.shouldInclude("description") {
+            if let desc = issue.description, !desc.isEmpty {
+                lines.append("")
+                lines.append("## Description")
+                lines.append(desc)
+            }
+        }
+
+        // Custom fields
+        if filter.shouldInclude("custom_fields") {
+            if let fields = issue.customFields, !fields.isEmpty {
+                lines.append("")
+                lines.append("## Custom Fields")
+                for field in fields {
+                    let val = field.value?.asString ?? "(empty)"
+                    lines.append("- \(field.name ?? "Field \(field.id)"): \(val)")
+                }
+            }
+        }
+
+        // Checklists (parsed from journals)
+        if filter.shouldInclude("journals") && features.checklists {
             let checklists = issue.parseChecklists()
             if !checklists.isEmpty {
                 lines.append("")
@@ -103,65 +122,119 @@ enum ResponseFormatter {
         }
 
         // Children
-        if let children = issue.children, !children.isEmpty {
-            lines.append("")
-            lines.append("## Child Issues")
-            for child in children {
-                lines.append("- \(formatIssueSummary(child))")
+        if filter.shouldInclude("children") {
+            if let children = issue.children, !children.isEmpty {
+                lines.append("")
+                lines.append("## Child Issues")
+                for child in children {
+                    lines.append("- \(formatIssueSummary(child))")
+                }
             }
         }
 
         // Relations
-        if let relations = issue.relations, !relations.isEmpty {
-            lines.append("")
-            lines.append("## Relations")
-            for rel in relations {
-                lines.append("- \(rel.relationType ?? "related") #\(rel.issueToId)")
+        if filter.shouldInclude("relations") {
+            if let relations = issue.relations, !relations.isEmpty {
+                lines.append("")
+                lines.append("## Relations")
+                for rel in relations {
+                    lines.append("- \(rel.relationType ?? "related") #\(rel.issueToId)")
+                }
             }
         }
 
         // Attachments
-        if let attachments = issue.attachments, !attachments.isEmpty {
-            lines.append("")
-            lines.append("## Attachments")
-            for att in attachments {
-                lines.append("- \(att.filename ?? "file") (\(att.filesize ?? 0) bytes)")
+        if filter.shouldInclude("attachments") {
+            if let attachments = issue.attachments, !attachments.isEmpty {
+                lines.append("")
+                lines.append("## Attachments")
+                for att in attachments {
+                    lines.append("- \(att.filename ?? "file") (\(att.filesize ?? 0) bytes)")
+                }
             }
         }
 
         // Watchers
-        if let watchers = issue.watchers, !watchers.isEmpty {
-            lines.append("")
-            lines.append("## Watchers")
-            for w in watchers {
-                lines.append("- \(w.name ?? "User \(w.id)")")
+        if filter.shouldInclude("watchers") {
+            if let watchers = issue.watchers, !watchers.isEmpty {
+                lines.append("")
+                lines.append("## Watchers")
+                for w in watchers {
+                    lines.append("- \(w.name ?? "User \(w.id)")")
+                }
             }
         }
 
-        // Journals (recent, last 10)
-        if let journals = issue.journals, !journals.isEmpty {
-            lines.append("")
-            lines.append("## Journal (last \(min(journals.count, 10)) of \(journals.count) entries)")
-            for journal in journals.suffix(10) {
-                let user = journal.user?.name ?? "Unknown"
-                let date = journal.createdOn ?? ""
-                lines.append("")
-                lines.append("### \(user) — \(date)")
-                if let notes = journal.notes, !notes.isEmpty {
-                    lines.append(notes)
+        // Journals
+        if filter.shouldInclude("journals") {
+            if let journals = issue.journals, !journals.isEmpty {
+                // Apply journals_since filter
+                var filtered = journals
+                if let since = filter.journalsSince {
+                    filtered = filtered.filter { journal in
+                        guard let date = journal.createdOn else { return false }
+                        // Compare date strings (works for both YYYY-MM-DD and ISO 8601)
+                        return date >= since
+                    }
                 }
-                if let details = journal.details {
-                    for detail in details {
-                        if detail.name == "checklist" { continue } // Already shown above
-                        let old = detail.oldValue?.asString ?? "(none)"
-                        let new = detail.newValue?.asString ?? "(none)"
-                        lines.append("  Changed \(detail.name ?? "field"): \(old) → \(new)")
+
+                // Apply journals_limit (take last N)
+                let total = filtered.count
+                let limited = Array(filtered.suffix(filter.journalsLimit))
+
+                // Build header reflecting filtering
+                var header = "## Journal (last \(limited.count) of \(total) entries"
+                if let since = filter.journalsSince {
+                    header += ", since \(since)"
+                }
+                header += ")"
+
+                lines.append("")
+                lines.append(header)
+                for journal in limited {
+                    let user = journal.user?.name ?? "Unknown"
+                    let date = journal.createdOn ?? ""
+                    lines.append("")
+                    lines.append("### \(user) — \(date)")
+                    if let notes = journal.notes, !notes.isEmpty {
+                        lines.append(notes)
+                    }
+                    if let details = journal.details {
+                        for detail in details {
+                            if detail.name == "checklist" { continue } // Already shown above
+                            let old = detail.oldValue?.asString ?? "(none)"
+                            let new = detail.newValue?.asString ?? "(none)"
+                            lines.append("  Changed \(detail.name ?? "field"): \(old) → \(new)")
+                        }
                     }
                 }
             }
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Due Date Warning
+
+    static func dueDateWarning(_ dueDateStr: String) -> String? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone.current
+        guard let dueDate = formatter.date(from: dueDateStr) else { return nil }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let due = calendar.startOfDay(for: dueDate)
+        let days = calendar.dateComponents([.day], from: today, to: due).day ?? 0
+
+        if days < 0 {
+            return "⚠ OVERDUE by \(-days) day\(-days == 1 ? "" : "s") (due \(dueDateStr))"
+        } else if days == 0 {
+            return "⚠ Due today (\(dueDateStr))"
+        } else if days <= 3 {
+            return "⚠ Due in \(days) day\(days == 1 ? "" : "s") (\(dueDateStr))"
+        }
+        return nil
     }
 
     // MARK: - Time Entries

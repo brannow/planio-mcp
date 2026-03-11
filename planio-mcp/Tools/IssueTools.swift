@@ -2,7 +2,7 @@ import Foundation
 import MCP
 
 enum IssueTools {
-    static func handle(_ params: CallTool.Parameters, client: PlanioClient, features: Features) async throws -> CallTool.Result {
+    static func handle(_ params: CallTool.Parameters, client: PlanioClient, server: Server? = nil, features: Features) async throws -> CallTool.Result {
         let p = ToolParams(args: params.arguments)
 
         switch params.name {
@@ -16,6 +16,8 @@ enum IssueTools {
             return try await updateIssue(p, client: client, features: features)
         case "delete_issue":
             return try await deleteIssue(p, client: client)
+        case "bulk_get_issues":
+            return try await bulkGetIssues(p, params: params, client: client, server: server, features: features)
         case "add_watcher":
             return try await addWatcher(p, client: client)
         case "remove_watcher":
@@ -25,20 +27,37 @@ enum IssueTools {
         }
     }
 
+    // MARK: - Resolve Helper
+
+    private static func resolveOptional(
+        _ p: ToolParams, key: String, field: ResolvableField,
+        projectId: Int?, client: PlanioClient
+    ) async throws -> Int? {
+        guard let raw = p.optionalStringOrInt(key) else { return nil }
+        if raw.isEmpty { return nil }
+        return try await NameResolver.resolve(raw, field: field, projectId: projectId, client: client)
+    }
+
     // MARK: - List Issues
 
     private static func listIssues(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
         var query: [String: String] = [:]
 
-        if let projectId = p.optionalInt("project_id") { query["project_id"] = String(projectId) }
-        if let statusId = p.optionalString("status_id") { query["status_id"] = statusId }
+        let projectIdRaw = p.optionalStringOrInt("project_id")
+        if let projectIdRaw { query["project_id"] = projectIdRaw }
+        let projectIdInt = projectIdRaw.flatMap { Int($0) } // numeric ID for metadata lookups
+        query["status_id"] = p.optionalString("status_id") ?? "open"
         if let assignedToId = p.optionalString("assigned_to_id") { query["assigned_to_id"] = assignedToId }
-        if let trackerId = p.optionalInt("tracker_id") { query["tracker_id"] = String(trackerId) }
+        if let trackerId = try await resolveOptional(p, key: "tracker_id", field: .tracker, projectId: projectIdInt, client: client) {
+            query["tracker_id"] = String(trackerId)
+        }
         if let sort = p.optionalString("sort") { query["sort"] = sort }
         if let createdOn = p.optionalString("created_on") { query["created_on"] = createdOn }
         if let updatedOn = p.optionalString("updated_on") { query["updated_on"] = updatedOn }
         if let authorId = p.optionalInt("author_id") { query["author_id"] = String(authorId) }
-        if let fixedVersionId = p.optionalInt("fixed_version_id") { query["fixed_version_id"] = String(fixedVersionId) }
+        if let fixedVersionId = try await resolveOptional(p, key: "fixed_version_id", field: .version, projectId: projectIdInt, client: client) {
+            query["fixed_version_id"] = String(fixedVersionId)
+        }
         if let limit = p.optionalInt("limit") { query["limit"] = String(limit) }
         if let offset = p.optionalInt("offset") { query["offset"] = String(offset) }
 
@@ -60,36 +79,93 @@ enum IssueTools {
 
     private static func getIssue(_ p: ToolParams, client: PlanioClient, features: Features) async throws -> CallTool.Result {
         let issueId = try p.requireInt("issue_id")
-        let include = p.optionalString("include")
+        let filter = parseFilterOptions(p)
 
-        let data = try await client.getIssue(id: issueId, include: include)
+        let data = try await client.getIssue(id: issueId)
         let response = try JSONDecoder().decode(IssueResponse.self, from: data)
-        return .init(content: [.text(ResponseFormatter.formatIssueDetail(response.issue, features: features))])
+        return .init(content: [.text(ResponseFormatter.formatIssueDetail(response.issue, features: features, filter: filter))])
+    }
+
+    // MARK: - Bulk Get Issues
+
+    private static func bulkGetIssues(_ p: ToolParams, params: CallTool.Parameters, client: PlanioClient, server: Server?, features: Features) async throws -> CallTool.Result {
+        let issueIds = try p.requireIntArray("issue_ids")
+        let filter = parseFilterOptions(p)
+
+        // Progress helper — throttled to max once per 3 seconds, first notification delayed
+        let progressToken = params._meta?.progressToken
+        let startMs = UInt64(Date().timeIntervalSince1970 * 1000)
+        var lastProgressMs: UInt64 = 0
+        let progressIntervalMs: UInt64 = 3000
+
+        let sendProgress: (Double, Double, String) async -> Void = { progress, total, message in
+            guard let server, let token = progressToken else { return }
+            let nowMs = UInt64(Date().timeIntervalSince1970 * 1000)
+            guard (nowMs - startMs) >= progressIntervalMs else { return }
+            guard lastProgressMs == 0 || (nowMs - lastProgressMs) >= progressIntervalMs else { return }
+            lastProgressMs = nowMs
+
+            let notification = ProgressNotification.message(
+                .init(progressToken: token, progress: progress, total: total, message: message)
+            )
+            try? await server.notify(notification)
+        }
+
+        // Cache-aware bulk fetch — only uncached IDs hit the API
+        let issueData = try await client.getIssues(
+            ids: issueIds,
+            concurrency: 10,
+            onProgress: { completed, total in
+                let progress = Double(Int((Double(completed) / Double(total)) * 100.0))
+                await sendProgress(progress, 100, "Fetched \(completed) of \(total) issues...")
+            }
+        )
+
+        // Format in original order, partial failures shown as errors
+        let decoder = JSONDecoder()
+        var output: [String] = []
+        for id in issueIds {
+            if let data = issueData[id] {
+                do {
+                    let response = try decoder.decode(IssueResponse.self, from: data)
+                    output.append(ResponseFormatter.formatIssueDetail(response.issue, features: features, filter: filter))
+                } catch {
+                    output.append("# Issue #\(id): ERROR — \(error.localizedDescription)")
+                }
+            } else {
+                output.append("# Issue #\(id): ERROR — No result")
+            }
+        }
+        return .init(content: [.text(output.joined(separator: "\n\n---\n\n"))])
     }
 
     // MARK: - Create Issue
 
     private static func createIssue(_ p: ToolParams, client: PlanioClient, features: Features) async throws -> CallTool.Result {
-        let projectId = try p.requireInt("project_id")
+        guard let projectIdRaw = p.optionalStringOrInt("project_id"), !projectIdRaw.isEmpty else {
+            throw ToolError.missingParam("project_id")
+        }
         let subject = try p.requireString("subject")
 
+        // Redmine accepts both numeric ID and string identifier in POST body
         var issueData: [String: Any] = [
-            "project_id": projectId,
+            "project_id": Int(projectIdRaw) ?? projectIdRaw as Any,
             "subject": subject
         ]
 
-        if let trackerId = p.optionalInt("tracker_id") { issueData["tracker_id"] = trackerId }
-        if let statusId = p.optionalInt("status_id") { issueData["status_id"] = statusId }
-        if let priorityId = p.optionalInt("priority_id") { issueData["priority_id"] = priorityId }
-        if let assignedToId = p.optionalInt("assigned_to_id") { issueData["assigned_to_id"] = assignedToId }
+        let projectIdInt = Int(projectIdRaw) // numeric ID for metadata lookups
+        if let v = try await resolveOptional(p, key: "tracker_id", field: .tracker, projectId: projectIdInt, client: client) { issueData["tracker_id"] = v }
+        if let v = try await resolveOptional(p, key: "status_id", field: .status, projectId: projectIdInt, client: client) { issueData["status_id"] = v }
+        if let v = try await resolveOptional(p, key: "priority_id", field: .priority, projectId: projectIdInt, client: client) { issueData["priority_id"] = v }
+        if let v = try await resolveOptional(p, key: "assigned_to_id", field: .assignee, projectId: projectIdInt, client: client) { issueData["assigned_to_id"] = v }
         if let parentId = p.optionalInt("parent_issue_id") { issueData["parent_issue_id"] = parentId }
-        if let versionId = p.optionalInt("fixed_version_id") { issueData["fixed_version_id"] = versionId }
+        if let v = try await resolveOptional(p, key: "fixed_version_id", field: .version, projectId: projectIdInt, client: client) { issueData["fixed_version_id"] = v }
         if let desc = p.optionalString("description") { issueData["description"] = desc }
         if let start = p.optionalString("start_date") { issueData["start_date"] = start }
         if let due = p.optionalString("due_date") { issueData["due_date"] = due }
         if let est = p.optionalDouble("estimated_hours") { issueData["estimated_hours"] = est }
         if let isPrivate = p.optionalBool("is_private") { issueData["is_private"] = isPrivate }
-        if let categoryId = p.optionalInt("category_id") { issueData["category_id"] = categoryId }
+        if let v = try await resolveOptional(p, key: "category_id", field: .category, projectId: projectIdInt, client: client) { issueData["category_id"] = v }
 
         // Custom fields
         if let customFields = p.optionalArray("custom_fields") {
@@ -123,22 +199,28 @@ enum IssueTools {
     private static func updateIssue(_ p: ToolParams, client: PlanioClient, features: Features) async throws -> CallTool.Result {
         let issueId = try p.requireInt("issue_id")
 
+        // Fetch issue to get project context for resolution
+        let issueData_ = try await client.getIssue(id: issueId)
+        let issueResponse = try JSONDecoder().decode(IssueResponse.self, from: issueData_)
+        let projectId = issueResponse.issue.project?.id
+
         var issueData: [String: Any] = [:]
 
         if let subject = p.optionalString("subject") { issueData["subject"] = subject }
-        if let trackerId = p.optionalInt("tracker_id") { issueData["tracker_id"] = trackerId }
-        if let statusId = p.optionalInt("status_id") { issueData["status_id"] = statusId }
-        if let priorityId = p.optionalInt("priority_id") { issueData["priority_id"] = priorityId }
-        if let assignedToId = p.optionalString("assigned_to_id") {
-            // Support empty string to unassign
-            if assignedToId.isEmpty {
+        if let v = try await resolveOptional(p, key: "tracker_id", field: .tracker, projectId: projectId, client: client) { issueData["tracker_id"] = v }
+        if let v = try await resolveOptional(p, key: "status_id", field: .status, projectId: projectId, client: client) { issueData["status_id"] = v }
+        if let v = try await resolveOptional(p, key: "priority_id", field: .priority, projectId: projectId, client: client) { issueData["priority_id"] = v }
+        // assigned_to_id: empty string = unassign, otherwise resolve by name
+        if let assignedRaw = p.optionalStringOrInt("assigned_to_id") {
+            if assignedRaw.isEmpty {
                 issueData["assigned_to_id"] = ""
-            } else if let intId = Int(assignedToId) {
-                issueData["assigned_to_id"] = intId
+            } else {
+                let resolved = try await NameResolver.resolve(assignedRaw, field: .assignee, projectId: projectId, client: client)
+                issueData["assigned_to_id"] = resolved
             }
         }
         if let parentId = p.optionalInt("parent_issue_id") { issueData["parent_issue_id"] = parentId }
-        if let versionId = p.optionalInt("fixed_version_id") { issueData["fixed_version_id"] = versionId }
+        if let v = try await resolveOptional(p, key: "fixed_version_id", field: .version, projectId: projectId, client: client) { issueData["fixed_version_id"] = v }
         if let desc = p.optionalString("description") { issueData["description"] = desc }
         if let start = p.optionalString("start_date") { issueData["start_date"] = start }
         if let due = p.optionalString("due_date") { issueData["due_date"] = due }
@@ -146,7 +228,7 @@ enum IssueTools {
         if let done = p.optionalInt("done_ratio") { issueData["done_ratio"] = done }
         if let notes = p.optionalString("notes") { issueData["notes"] = notes }
         if let isPrivate = p.optionalBool("is_private") { issueData["is_private"] = isPrivate }
-        if let categoryId = p.optionalInt("category_id") { issueData["category_id"] = categoryId }
+        if let v = try await resolveOptional(p, key: "category_id", field: .category, projectId: projectId, client: client) { issueData["category_id"] = v }
 
         // Custom fields
         if let customFields = p.optionalArray("custom_fields") {
@@ -195,6 +277,26 @@ enum IssueTools {
         let userId = try p.requireInt("user_id")
         _ = try await client.delete(path: "/issues/\(issueId)/watchers/\(userId)")
         return .init(content: [.text("User \(userId) removed as watcher from issue #\(issueId).")])
+    }
+
+    // MARK: - Filter Options
+
+    private static func parseFilterOptions(_ p: ToolParams) -> IssueFilterOptions {
+        let limit = p.optionalInt("journals_limit") ?? 10
+        let since = p.optionalString("journals_since")
+
+        let sections: Set<String>?
+        if let sectionsStr = p.optionalString("sections") {
+            let parsed = Set(sectionsStr.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces).lowercased()
+            })
+            // "metadata" is a virtual section meaning "core only, nothing else"
+            sections = parsed.subtracting(["metadata"])
+        } else {
+            sections = nil  // nil = show everything
+        }
+
+        return IssueFilterOptions(sections: sections, journalsLimit: limit, journalsSince: since)
     }
 
     // MARK: - Helpers

@@ -12,7 +12,7 @@ enum ActivityTools {
             return formatter.string(from: Date())
         }()
         let userId = p.optionalInt("user_id")
-        let projectId = p.optionalInt("project_id")
+        let projectIdRaw = p.optionalStringOrInt("project_id")
 
         // Progress helper — throttled to max once per 3 seconds, always fires on 100%
         var lastProgressMs: UInt64 = 0
@@ -48,7 +48,7 @@ enum ActivityTools {
             "to": to,
             "limit": "100"
         ]
-        if let projectId { timeQuery["project_id"] = String(projectId) }
+        if let projectIdRaw { timeQuery["project_id"] = projectIdRaw }
 
         let timeEntries = try await fetchAllTimeEntries(client: client, query: timeQuery)
 
@@ -59,7 +59,7 @@ enum ActivityTools {
             "created_on": "><\(from)|\(to)",
             "limit": "100"
         ]
-        if let projectId { authorQuery["project_id"] = String(projectId) }
+        if let projectIdRaw { authorQuery["project_id"] = projectIdRaw }
         let authoredIssues: IssuesResponse = try await client.get(path: "/issues", queryParams: authorQuery)
 
         // Step 4: Full scan — all issues updated in date range
@@ -69,7 +69,7 @@ enum ActivityTools {
             "status_id": "*",
             "limit": "100"
         ]
-        if let projectId { scanQuery["project_id"] = String(projectId) }
+        if let projectIdRaw { scanQuery["project_id"] = projectIdRaw }
         let updatedIssues = try await fetchAllIssues(client: client, query: scanQuery)
 
         // Step 5: Collect unique issue IDs
@@ -84,17 +84,15 @@ enum ActivityTools {
             issueIds.insert(issue.id)
         }
 
-        await sendProgress(25, 100, "Scanning journals for \(issueIds.count) issues...")
+        await sendProgress(25, 100, "Loading \(issueIds.count) issues...")
 
-        // Step 6: Fetch issue details with journals (parallel, concurrency 10)
-        let issueDetails = try await fetchIssuesWithJournals(
+        // Step 6: Fetch full issue details (cache-aware — only uncached IDs hit API)
+        let issueDetails = try await client.getIssues(
             ids: Array(issueIds),
-            client: client,
             concurrency: 10,
             onProgress: { completed, total in
-                // Map journal fetching to 25-90% of total progress
-                let progress = 25.0 + (Double(completed) / Double(total)) * 65.0
-                await sendProgress(progress, 100, "Scanning journals: \(completed) of \(total) issues...")
+                let progress = Double(Int(25.0 + (Double(completed) / Double(total)) * 65.0))
+                await sendProgress(progress, 100, "Loading issues: \(completed) of \(total)...")
             }
         )
 
@@ -175,7 +173,7 @@ enum ActivityTools {
         }
 
         // Step 8: Format as plain log
-        let output = formatLog(logByDate: logByDate, timeEntries: timeEntries, userId: resolvedUserId, from: from, to: to)
+        let output = formatLog(logByDate: logByDate, timeEntries: timeEntries, issueDetails: issueDetails, userId: resolvedUserId, from: from, to: to)
 
         return .init(content: [.text(output)])
     }
@@ -214,41 +212,12 @@ enum ActivityTools {
         return allIssues
     }
 
-    // MARK: - Parallel Journal Fetching
-
-    private static func fetchIssuesWithJournals(
-        ids: [Int],
-        client: PlanioClient,
-        concurrency: Int,
-        onProgress: ((Int, Int) async -> Void)? = nil
-    ) async throws -> [Int: Data] {
-        var results: [Int: Data] = [:]
-        let total = ids.count
-        var completed = 0
-
-        for chunk in ids.chunked(into: concurrency) {
-            try await withThrowingTaskGroup(of: (Int, Data).self) { group in
-                for id in chunk {
-                    group.addTask {
-                        let data = try await client.getIssue(id: id, include: "journals")
-                        return (id, data)
-                    }
-                }
-                for try await (id, data) in group {
-                    results[id] = data
-                    completed += 1
-                    await onProgress?(completed, total)
-                }
-            }
-        }
-        return results
-    }
-
     // MARK: - Formatting
 
     private static func formatLog(
         logByDate: [String: [Int: IssueLog]],
         timeEntries: [TimeEntry],
+        issueDetails: [Int: Data] = [:],
         userId: Int,
         from: String,
         to: String
@@ -280,9 +249,25 @@ enum ActivityTools {
             return aMin < bMin
         }
 
+        let decoder = JSONDecoder()
         for (issueId, issueData) in sortedIssues {
             let subject = issueData.subject ?? "Unknown"
-            lines.append("#\(issueId): \(subject)")
+            var header = "#\(issueId): \(subject)"
+
+            // Time budget from issue details
+            if let data = issueDetails[issueId],
+               let response = try? decoder.decode(IssueResponse.self, from: data) {
+                let issue = response.issue
+                if let spent = issue.spentHours, spent > 0 {
+                    if let est = issue.estimatedHours, est > 0 {
+                        header += " (\(String(format: "%.1f", spent))h of \(String(format: "%.1f", est))h)"
+                    } else {
+                        header += " (\(String(format: "%.1f", spent))h spent)"
+                    }
+                }
+            }
+
+            lines.append(header)
 
             let sortedDates = issueData.dates.keys.sorted()
             for date in sortedDates {

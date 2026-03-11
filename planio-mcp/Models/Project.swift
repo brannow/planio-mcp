@@ -33,6 +33,7 @@ struct Project: Decodable {
     let issueCategories: [IdName]?
     let enabledModules: [EnabledModule]?
     let timeEntryActivities: [IdName]?
+    let versions: [IdName]?
 
     enum CodingKeys: String, CodingKey {
         case id, name, identifier, description, status
@@ -44,6 +45,7 @@ struct Project: Decodable {
         case issueCategories = "issue_categories"
         case enabledModules = "enabled_modules"
         case timeEntryActivities = "time_entry_activities"
+        case versions
     }
 }
 
