@@ -11,6 +11,8 @@ This server is an **intent interface**, not an API proxy. The agent says *what i
 - **Name resolution** — `tracker_id: "Bug"`, `priority_id: "High"`, `activity_id: "Development"` just work. The server resolves names to IDs internally. On mismatch, it returns the valid options so the agent self-corrects.
 - **Project identifiers** — `project_id` accepts both numeric IDs (`5`) and Redmine identifiers (`"my-project"`) across all tools.
 - **Contextual feedback** — Booking time returns the issue's time budget. Overdue issues show warnings. The agent doesn't need follow-up calls to understand the situation.
+- **Current-user default** — `list_time_entries` and `get_activity` default to the authenticated user, just like any logged-in UI. Pass `user_id` only when you need someone else's data.
+- **Auto-pagination** — `list_time_entries` fetches all matching entries automatically (up to 500). No manual offset/limit needed.
 - **Backward compatible** — Numeric IDs still work everywhere. Clients sending `{"tracker_id": 3}` as int or `"3"` as string are both handled.
 
 ## Setup
@@ -87,7 +89,7 @@ npx @modelcontextprotocol/inspector /absolute/path/to/planio-mcp
 
 | Tool | Description |
 |------|-------------|
-| `list_time_entries` | Filter by project, issue, user, date range |
+| `list_time_entries` | Defaults to current user. Filter by project, issue, date range. Auto-paginates up to 500 entries. |
 | `get_time_entry` | Single entry details |
 | `create_time_entry` | Book time against issue or project. Activity accepts names. Returns time budget context (spent vs estimated). |
 | `update_time_entry` | Modify existing entry. Activity accepts names. |
@@ -203,6 +205,6 @@ planio-mcp/
 
 - **Redmine compatible** — all endpoints are standard Redmine REST API
 - **Auth:** `X-Redmine-API-Key` header
-- **Caching:** 5-minute in-memory TTL for issues and metadata (statuses, priorities, trackers, per-project metadata). Auto-invalidated on writes. Bulk fetches (`get_activity`, `bulk_get_issues`) skip already-cached issues — repeat calls within TTL are near-instant.
+- **Caching:** 5-minute in-memory TTL for issues and metadata (statuses, priorities, trackers, per-project metadata). Auto-invalidated on writes. Current user is cached for the process lifetime (immutable). Bulk fetches (`get_activity`, `bulk_get_issues`) skip already-cached issues — repeat calls within TTL are near-instant.
 - **Parallel fetching:** `get_activity` and `bulk_get_issues` use cache-aware bulk loading (10 concurrent) with progress notifications.
 - **Swift 5 / macOS** — uses [mcp-swift-sdk](https://github.com/modelcontextprotocol/swift-sdk)

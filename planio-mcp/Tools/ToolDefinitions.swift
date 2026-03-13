@@ -245,7 +245,7 @@ enum ToolDefinitions {
 
     static let listTimeEntries = Tool(
         name: "list_time_entries",
-        description: "List booked time entries. Filter by project, issue, user, or date range.",
+        description: "List booked time entries for the current user. Filter by project, issue, or date range. Defaults to current user — pass user_id only to see another user's entries. Automatically paginates (up to 500 entries).",
         inputSchema: .object([
             "type": .string("object"),
             "properties": .object([
@@ -253,9 +253,7 @@ enum ToolDefinitions {
                 "issue_id": prop("integer", "Filter by issue ID"),
                 "user_id": prop("integer", "Filter by user ID"),
                 "from": prop("string", "Start date (YYYY-MM-DD)"),
-                "to": prop("string", "End date (YYYY-MM-DD)"),
-                "limit": prop("integer", "Max results (default 25, max 100)"),
-                "offset": prop("integer", "Pagination offset (default 0)")
+                "to": prop("string", "End date (YYYY-MM-DD)")
             ])
         ]),
         annotations: readOnly

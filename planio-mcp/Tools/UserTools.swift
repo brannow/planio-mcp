@@ -16,8 +16,8 @@ enum UserTools {
     }
 
     private static func getCurrentUser(client: PlanioClient) async throws -> CallTool.Result {
-        let response: UserResponse = try await client.get(path: "/users/current")
-        return .init(content: [.text(ResponseFormatter.formatUserDetail(response.user))])
+        let user = try await client.getCurrentUser()
+        return .init(content: [.text(ResponseFormatter.formatUserDetail(user))])
     }
 
     private static func listUsers(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {

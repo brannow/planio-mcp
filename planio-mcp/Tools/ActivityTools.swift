@@ -36,8 +36,7 @@ enum ActivityTools {
         if let userId {
             resolvedUserId = userId
         } else {
-            let userResponse: UserResponse = try await client.get(path: "/users/current")
-            resolvedUserId = userResponse.user.id
+            resolvedUserId = try await client.getCurrentUser().id
         }
 
         // Step 2: Fetch time entries for user in date range
@@ -50,7 +49,7 @@ enum ActivityTools {
         ]
         if let projectIdRaw { timeQuery["project_id"] = projectIdRaw }
 
-        let timeEntries = try await fetchAllTimeEntries(client: client, query: timeQuery)
+        let (timeEntries, _, _) = try await fetchAllTimeEntries(client: client, query: timeQuery)
 
         // Step 3: Fetch issues authored by user in date range
         await sendProgress(15, 100, "Fetching authored issues...")
@@ -180,20 +179,25 @@ enum ActivityTools {
 
     // MARK: - Pagination Helpers
 
-    private static func fetchAllTimeEntries(client: PlanioClient, query: [String: String]) async throws -> [TimeEntry] {
+    static func fetchAllTimeEntries(client: PlanioClient, query: [String: String], maxEntries: Int? = nil) async throws -> (entries: [TimeEntry], totalCount: Int, capped: Bool) {
         var allEntries: [TimeEntry] = []
         var offset = 0
         var q = query
+        var totalCount = 0
 
         while true {
             q["offset"] = String(offset)
             let response: TimeEntriesResponse = try await client.get(path: "/time_entries", queryParams: q)
+            totalCount = response.totalCount
             allEntries.append(contentsOf: response.timeEntries)
+            if let max = maxEntries, allEntries.count >= max {
+                return (Array(allEntries.prefix(max)), totalCount, true)
+            }
             if allEntries.count >= response.totalCount { break }
             offset += response.timeEntries.count
             if response.timeEntries.isEmpty { break }
         }
-        return allEntries
+        return (allEntries, totalCount, false)
     }
 
     private static func fetchAllIssues(client: PlanioClient, query: [String: String]) async throws -> [Issue] {

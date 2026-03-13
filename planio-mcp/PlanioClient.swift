@@ -15,6 +15,9 @@ actor PlanioClient {
     private var globalPriorities: (data: [IdName], fetchedAt: Date)?
     private var globalTrackers: (data: [IdName], fetchedAt: Date)?
 
+    // Current user (immutable for process lifetime, fetched once)
+    private var currentUser: User?
+
     // Per-project metadata cache
     struct ProjectMetadata {
         let trackers: [IdName]
@@ -178,6 +181,13 @@ actor PlanioClient {
             queryParams: ["name": name, "limit": "10"]
         )
         return response.users
+    }
+
+    func getCurrentUser() async throws -> User {
+        if let currentUser { return currentUser }
+        let response: UserResponse = try await get(path: "/users/current")
+        currentUser = response.user
+        return response.user
     }
 
     // Fetch single issue — always full data (all includes), cache-aware

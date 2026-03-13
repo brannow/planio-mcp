@@ -255,6 +255,17 @@ enum ResponseFormatter {
         return lines.joined(separator: "\n")
     }
 
+    static func formatTimeEntryList(_ entries: [TimeEntry]) -> String {
+        var lines: [String] = []
+        lines.append("Time Entries (\(entries.count) total):")
+        lines.append("")
+
+        for entry in entries {
+            lines.append(formatTimeEntrySummary(entry))
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func formatTimeEntrySummary(_ entry: TimeEntry) -> String {
         var parts: [String] = []
         parts.append("ID:\(entry.id)")

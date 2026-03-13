@@ -22,20 +22,27 @@ enum TimeEntryTools {
     }
 
     private static func listTimeEntries(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
-        var query: [String: String] = [:]
+        // Default to current user (standard login behavior)
+        let userId: Int
+        if let explicit = p.optionalInt("user_id") {
+            userId = explicit
+        } else {
+            userId = try await client.getCurrentUser().id
+        }
+
+        var query: [String: String] = ["limit": "100", "user_id": String(userId)]
         if let projectId = p.optionalStringOrInt("project_id") { query["project_id"] = projectId }
         if let issueId = p.optionalInt("issue_id") { query["issue_id"] = String(issueId) }
-        if let userId = p.optionalInt("user_id") { query["user_id"] = String(userId) }
         if let from = p.optionalString("from") { query["from"] = from }
         if let to = p.optionalString("to") { query["to"] = to }
-        if let limit = p.optionalInt("limit") { query["limit"] = String(limit) }
-        if let offset = p.optionalInt("offset") { query["offset"] = String(offset) }
 
-        let response: TimeEntriesResponse = try await client.get(
-            path: "/time_entries",
-            queryParams: query.isEmpty ? nil : query
-        )
-        return .init(content: [.text(ResponseFormatter.formatTimeEntryList(response))])
+        let (entries, totalCount, capped) = try await ActivityTools.fetchAllTimeEntries(client: client, query: query, maxEntries: 500)
+
+        var output = ResponseFormatter.formatTimeEntryList(entries)
+        if capped {
+            output += "\n\nShowing first \(entries.count) of \(totalCount) entries. Narrow the date range for complete results."
+        }
+        return .init(content: [.text(output)])
     }
 
     private static func getTimeEntry(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
