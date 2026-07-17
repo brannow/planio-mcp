@@ -311,7 +311,7 @@
 			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.11.0;
+				minimumVersion = 0.12.1;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

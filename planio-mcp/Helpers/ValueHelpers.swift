@@ -37,6 +37,15 @@ extension Value {
     }
 }
 
+// Convenience for tool results: `.text("...")` without annotations/_meta.
+// Exact-arity overload, so call sites resolve here instead of the SDK's
+// deprecated `text(_:metadata:)` compatibility shim.
+extension Tool.Content {
+    static func text(_ text: String) -> Self {
+        .text(text: text, annotations: nil, _meta: nil)
+    }
+}
+
 // Safe parameter extraction from tool arguments
 struct ToolParams {
     let args: [String: Value]?
