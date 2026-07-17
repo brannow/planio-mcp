@@ -81,8 +81,14 @@ enum ResponseFormatter {
 
         // Hours
         if filter.shouldInclude("hours") {
-            if let est = issue.estimatedHours { lines.append("Estimated: \(est)h") }
-            if let spent = issue.spentHours { lines.append("Spent: \(spent)h") }
+            if let est = issue.estimatedHours { lines.append("Estimated: \(formatHours(est))") }
+            if let totalEst = issue.totalEstimatedHours, totalEst != issue.estimatedHours {
+                lines.append("Estimated (incl. sub-issues): \(formatHours(totalEst))")
+            }
+            if let spent = issue.spentHours { lines.append("Spent: \(formatHours(spent))") }
+            if let totalSpent = issue.totalSpentHours, totalSpent != issue.spentHours {
+                lines.append("Spent (incl. sub-issues): \(formatHours(totalSpent))")
+            }
         }
 
         // Description
@@ -121,24 +127,33 @@ enum ResponseFormatter {
             }
         }
 
-        // Children
+        // Children — the API nests sub-sub-issues recursively, render all levels
         if filter.shouldInclude("children") {
             if let children = issue.children, !children.isEmpty {
-                lines.append("")
-                lines.append("## Child Issues")
-                for child in children {
-                    lines.append("- \(formatIssueSummary(child))")
+                func countAll(_ nodes: [Issue]) -> Int {
+                    nodes.reduce(0) { $0 + 1 + countAll($1.children ?? []) }
                 }
+                lines.append("")
+                lines.append("## Child Issues (\(countAll(children)) total)")
+                appendChildLines(children, depth: 0, into: &lines)
+                lines.append("")
+                lines.append("Child entries only carry id/subject here. Use get_issue_tree for the full hierarchy with status, assignee, and time rollups.")
             }
         }
 
-        // Relations
+        // Relations — stored one-directional; invert the type when this issue
+        // is on the receiving end so it never prints itself as the target.
         if filter.shouldInclude("relations") {
             if let relations = issue.relations, !relations.isEmpty {
                 lines.append("")
                 lines.append("## Relations")
                 for rel in relations {
-                    lines.append("- \(rel.relationType ?? "related") #\(rel.issueToId)")
+                    let type = rel.relationType ?? "relates"
+                    if rel.issueToId == issue.id {
+                        lines.append("- \(invertedRelation(type)) #\(rel.issueId)")
+                    } else {
+                        lines.append("- \(type) #\(rel.issueToId)")
+                    }
                 }
             }
         }
@@ -212,6 +227,175 @@ enum ResponseFormatter {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: - Issue Tree
+
+    static func formatIssueTree(root: Issue, descendants: [Issue]) -> String {
+        // Index the fetched descendants; the nested children structure from the
+        // root detail defines the tree shape (list results carry the data).
+        let byId = Dictionary(descendants.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var openCount = 0
+        var closedCount = 0
+        var estimatedSum = 0.0
+        var withoutEstimate: [Int] = []
+        var notVisible: [Int] = []
+        var maxDepth = 0
+
+        // Subtree estimate rollup, computed from the nested shape so it works
+        // even when the server omits total_estimated_hours in list responses.
+        func subtreeEstimate(_ node: Issue) -> Double {
+            let resolved = byId[node.id] ?? node
+            var sum = resolved.estimatedHours ?? 0
+            for child in node.children ?? [] { sum += subtreeEstimate(child) }
+            return sum
+        }
+
+        func countIssues(_ node: Issue) -> Int {
+            (node.children ?? []).reduce(1) { $0 + countIssues($1) }
+        }
+
+        var lines: [String] = []
+
+        func render(_ node: Issue, depth: Int) {
+            maxDepth = max(maxDepth, depth)
+            let indent = String(repeating: "  ", count: depth)
+
+            // Nested children entries only carry id/tracker/subject — swap in
+            // the fully-populated issue from the bulk list fetch.
+            guard let issue = depth == 0 ? node : byId[node.id] else {
+                notVisible.append(node.id)
+                lines.append("\(indent)#\(node.id) [not visible] \(node.subject?.sanitized ?? "")")
+                for child in node.children ?? [] { render(child, depth: depth + 1) }
+                return
+            }
+
+            if depth > 0 {
+                if issue.closedOn != nil || issue.status?.name?.lowercased().contains("closed") == true {
+                    closedCount += 1
+                } else {
+                    openCount += 1
+                }
+                if let est = issue.estimatedHours {
+                    estimatedSum += est
+                } else {
+                    withoutEstimate.append(issue.id)
+                }
+            }
+
+            var parts: [String] = ["\(indent)#\(issue.id)"]
+            if let status = issue.status?.name { parts.append("[\(status)]") }
+            if let subject = issue.subject { parts.append(subject.sanitized) }
+
+            var meta: [String] = []
+            if let est = issue.estimatedHours { meta.append("est \(formatHours(est))") }
+            if let spent = issue.spentHours, spent > 0 { meta.append("spent \(formatHours(spent))") }
+            if let done = issue.doneRatio, done > 0 { meta.append("\(done)%") }
+            if let assignee = issue.assignedTo?.name { meta.append("@\(assignee)") }
+            if let due = issue.dueDate, issue.closedOn == nil { meta.append("due \(due)") }
+
+            // Branch rollup on inner nodes so big epics are scannable per branch.
+            // Prefer the server-side totals; fall back to summing visible nodes.
+            if let children = node.children, !children.isEmpty, depth > 0 {
+                let branchEst = issue.totalEstimatedHours ?? subtreeEstimate(node)
+                let branchCount = countIssues(node) - 1
+                var rollup = "subtree: \(branchCount) issues, est \(formatHours(branchEst))"
+                if let branchSpent = issue.totalSpentHours, branchSpent > 0 {
+                    rollup += ", spent \(formatHours(branchSpent))"
+                }
+                meta.append(rollup)
+            }
+
+            var line = parts.joined(separator: " ")
+            if !meta.isEmpty { line += " — " + meta.joined(separator: ", ") }
+            lines.append(line)
+
+            for child in node.children ?? [] { render(child, depth: depth + 1) }
+        }
+
+        render(root, depth: 0)
+
+        var header: [String] = []
+        header.append("# Issue Tree: #\(root.id) \(root.subject?.sanitized ?? "")")
+        if let project = root.project?.name { header.append("Project: \(project)") }
+
+        let total = openCount + closedCount
+        if total == 0 {
+            header.append("No sub-issues.")
+        } else {
+            header.append("Sub-issues: \(total) (\(openCount) open, \(closedCount) closed), max depth \(maxDepth)")
+        }
+
+        // Prefer the server-side rollup (includes issues the tree fetch might
+        // not see); fall back to our own sum from the visible nodes.
+        let rootEst = root.estimatedHours ?? 0
+        if let totalEst = root.totalEstimatedHours {
+            header.append("Estimated total: \(formatHours(totalEst)) (root itself: \(formatHours(rootEst)))")
+        } else if total > 0 {
+            header.append("Estimated total: \(formatHours(estimatedSum + rootEst)) (root itself: \(formatHours(rootEst)))")
+        }
+        if let totalSpent = root.totalSpentHours {
+            header.append("Spent total: \(formatHours(totalSpent)) (root itself: \(formatHours(root.spentHours ?? 0)))")
+        }
+        if let relations = root.relations, !relations.isEmpty {
+            let rels = relations.map { rel -> String in
+                let type = rel.relationType ?? "relates"
+                if rel.issueToId == root.id {
+                    return "\(invertedRelation(type)) #\(rel.issueId)"
+                }
+                return "\(type) #\(rel.issueToId)"
+            }
+            header.append("Relations: " + rels.joined(separator: ", "))
+        }
+        if !withoutEstimate.isEmpty {
+            let ids = withoutEstimate.prefix(20).map { "#\($0)" }.joined(separator: ", ")
+            let suffix = withoutEstimate.count > 20 ? ", …" : ""
+            header.append("⚠ \(withoutEstimate.count) sub-issue\(withoutEstimate.count == 1 ? "" : "s") without estimate: \(ids)\(suffix)")
+        }
+        if !notVisible.isEmpty {
+            header.append("⚠ \(notVisible.count) sub-issue\(notVisible.count == 1 ? "" : "s") not visible to you — totals may be incomplete")
+        }
+
+        if total == 0 {
+            return header.joined(separator: "\n")
+        }
+        return header.joined(separator: "\n") + "\n\n" + lines.joined(separator: "\n")
+    }
+
+    private static func appendChildLines(_ children: [Issue], depth: Int, into lines: inout [String]) {
+        let indent = String(repeating: "  ", count: depth)
+        for child in children {
+            var parts = ["\(indent)- #\(child.id)"]
+            if let tracker = child.tracker?.name { parts.append("[\(tracker)]") }
+            if let subject = child.subject { parts.append(subject.sanitized) }
+            lines.append(parts.joined(separator: " "))
+            if let nested = child.children, !nested.isEmpty {
+                appendChildLines(nested, depth: depth + 1, into: &lines)
+            }
+        }
+    }
+
+    // Relations are stored one-directional; shown from the other side the
+    // type must be inverted (e.g. #A blocks #B → #B is "blocked by #A").
+    private static func invertedRelation(_ type: String) -> String {
+        switch type {
+        case "blocks": return "blocked by"
+        case "precedes": return "follows"
+        case "duplicates": return "duplicated by"
+        case "copied_to": return "copied from"
+        default: return type
+        }
+    }
+
+    static func formatHours(_ hours: Double) -> String {
+        if hours == hours.rounded() {
+            return "\(Int(hours))h"
+        }
+        var s = String(format: "%.2f", hours)
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s + "h"
     }
 
     // MARK: - Due Date Warning

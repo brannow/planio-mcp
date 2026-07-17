@@ -18,6 +18,8 @@ enum IssueTools {
             return try await deleteIssue(p, client: client)
         case "bulk_get_issues":
             return try await bulkGetIssues(p, params: params, client: client, server: server, features: features)
+        case "get_issue_tree":
+            return try await getIssueTree(p, client: client)
         case "add_watcher":
             return try await addWatcher(p, client: client)
         case "remove_watcher":
@@ -48,6 +50,7 @@ enum IssueTools {
         let projectIdInt = projectIdRaw.flatMap { Int($0) } // numeric ID for metadata lookups
         query["status_id"] = p.optionalString("status_id") ?? "open"
         if let assignedToId = p.optionalString("assigned_to_id") { query["assigned_to_id"] = assignedToId }
+        if let parentId = p.optionalStringOrInt("parent_id") { query["parent_id"] = parentId }
         if let trackerId = try await resolveOptional(p, key: "tracker_id", field: .tracker, projectId: projectIdInt, client: client) {
             query["tracker_id"] = String(trackerId)
         }
@@ -137,6 +140,36 @@ enum IssueTools {
             }
         }
         return .init(content: [.text(output.joined(separator: "\n\n---\n\n"))])
+    }
+
+    // MARK: - Issue Tree
+
+    private static func getIssueTree(_ p: ToolParams, client: PlanioClient) async throws -> CallTool.Result {
+        let issueId = try p.requireInt("issue_id")
+
+        // Root detail: carries the nested descendant tree (include=children)
+        // and the server-side rollups (total_estimated_hours, total_spent_hours).
+        let data = try await client.getIssue(id: issueId)
+        let root = try JSONDecoder().decode(IssueResponse.self, from: data).issue
+
+        // Collect all descendant IDs from the nested children structure
+        var descendantIds: [Int] = []
+        func collect(_ issue: Issue) {
+            for child in issue.children ?? [] {
+                descendantIds.append(child.id)
+                collect(child)
+            }
+        }
+        collect(root)
+
+        guard !descendantIds.isEmpty else {
+            return .init(content: [.text(ResponseFormatter.formatIssueTree(root: root, descendants: []))])
+        }
+
+        // One list request per 100 descendants — brings status, assignee,
+        // estimates, done ratio for every node in the subtree.
+        let descendants = try await client.fetchIssuesByIds(descendantIds)
+        return .init(content: [.text(ResponseFormatter.formatIssueTree(root: root, descendants: descendants))])
     }
 
     // MARK: - Create Issue

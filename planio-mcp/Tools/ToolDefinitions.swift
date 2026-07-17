@@ -6,6 +6,7 @@ enum ToolDefinitions {
             // Issues
             listIssues,
             getIssue(features: features),
+            getIssueTree,
             bulkGetIssues(features: features),
             createIssue(features: features),
             updateIssue(features: features),
@@ -56,13 +57,14 @@ enum ToolDefinitions {
 
     static let listIssues = Tool(
         name: "list_issues",
-        description: "List issues. Returns open issues by default. Use status_id to include closed ('closed') or all ('*').",
+        description: "List issues with filters (flat list). Returns open issues by default. Use status_id to include closed ('closed') or all ('*'). Use parent_id for direct sub-issues of one issue; for the full recursive hierarchy with time rollups use get_issue_tree instead.",
         inputSchema: .object([
             "type": .string("object"),
             "properties": .object([
                 "project_id": prop("string", "Project ID or identifier (e.g. 'my-project')"),
                 "status_id": prop("string", "Status filter: 'open' (default), 'closed', '*' (all)"),
                 "assigned_to_id": prop("string", "Filter by assignee: user ID or 'me'"),
+                "parent_id": prop("string", "Filter by parent issue: an issue ID returns its direct children, '!*' returns only top-level issues (no parent)"),
                 "tracker_id": prop("string", "Tracker name or ID (e.g. 'Bug', 'Feature')"),
                 "author_id": prop("integer", "Filter by author (creator) user ID"),
                 "fixed_version_id": prop("string", "Version/sprint name or ID"),
@@ -77,7 +79,7 @@ enum ToolDefinitions {
     )
 
     static func getIssue(features: Features) -> Tool {
-        var desc = "Get issue details. Use 'sections' to control output — omit for everything, use 'metadata' for just core fields."
+        var desc = "Get issue details. Use 'sections' to control output — omit for everything, use 'metadata' for just core fields. For an issue's full sub-issue hierarchy with time rollups, use get_issue_tree instead."
         if features.checklists {
             desc += " Checklists are shown in the journals section — include 'journals' in sections to see checklist item IDs before modifying them."
         }
@@ -97,6 +99,19 @@ enum ToolDefinitions {
             annotations: readOnly
         )
     }
+
+    static let getIssueTree = Tool(
+        name: "get_issue_tree",
+        description: "Get the complete sub-issue hierarchy of an issue (all levels: sub-issues, sub-sub-issues, ...) with time rollups. Returns an indented tree with status, assignee, estimate and done% per issue, branch subtotals, and total estimated/spent hours for the whole subtree. Use this for epics or any issue with sub-issues instead of walking children manually with get_issue/bulk_get_issues — it resolves the entire tree in ~2 API calls.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("issue_id")]),
+            "properties": .object([
+                "issue_id": prop("integer", "The root issue ID (e.g. the epic)")
+            ])
+        ]),
+        annotations: readOnly
+    )
 
     static func bulkGetIssues(features: Features) -> Tool {
         Tool(

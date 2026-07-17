@@ -210,6 +210,22 @@ actor PlanioClient {
         return data
     }
 
+    // Fetch many issues via the list endpoint (one request per 100 IDs).
+    // Returns list-level data (status, assignee, estimated_hours, done_ratio, parent)
+    // without journals/relations — much cheaper than per-issue detail fetches.
+    func fetchIssuesByIds(_ ids: [Int]) async throws -> [Issue] {
+        var all: [Issue] = []
+        for chunk in ids.chunked(into: 100) {
+            let csv = chunk.map(String.init).joined(separator: ",")
+            let response: IssuesResponse = try await get(
+                path: "/issues",
+                queryParams: ["issue_id": csv, "status_id": "*", "limit": "100"]
+            )
+            all.append(contentsOf: response.issues)
+        }
+        return all
+    }
+
     // Fetch multiple issues — cache-aware, parallel, full data
     // Skips IDs already in cache. Only uncached IDs hit the API.
     // onProgress fires after each issue completes (cached or fetched).

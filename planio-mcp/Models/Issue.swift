@@ -39,6 +39,7 @@ struct Issue: Decodable {
     let doneRatio: Int?
     let isPrivate: Bool?
     let estimatedHours: Double?
+    let totalEstimatedHours: Double?
     let spentHours: Double?
     let totalSpentHours: Double?
     let customFields: [CustomField]?
@@ -65,6 +66,7 @@ struct Issue: Decodable {
         case doneRatio = "done_ratio"
         case isPrivate = "is_private"
         case estimatedHours = "estimated_hours"
+        case totalEstimatedHours = "total_estimated_hours"
         case spentHours = "spent_hours"
         case totalSpentHours = "total_spent_hours"
         case customFields = "custom_fields"
