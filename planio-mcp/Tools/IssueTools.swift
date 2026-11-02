@@ -260,6 +260,12 @@ enum IssueTools {
         if let est = p.optionalDouble("estimated_hours") { issueData["estimated_hours"] = est }
         if let done = p.optionalInt("done_ratio") { issueData["done_ratio"] = done }
         if let notes = p.optionalString("notes") { issueData["notes"] = notes }
+        if let privateNotes = p.optionalBool("private_notes") {
+            guard let notes = issueData["notes"] as? String, !notes.isEmpty else {
+                return .init(content: [.text("private_notes requires notes. Visibility of existing notes cannot be changed via the API (Planio returns 403 for journal edits).")], isError: true)
+            }
+            issueData["private_notes"] = privateNotes
+        }
         if let isPrivate = p.optionalBool("is_private") { issueData["is_private"] = isPrivate }
         if let v = try await resolveOptional(p, key: "category_id", field: .category, projectId: projectId, client: client) { issueData["category_id"] = v }
 

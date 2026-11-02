@@ -61,6 +61,7 @@ enum ResponseFormatter {
         if let version = issue.fixedVersion?.name { lines.append("Target version: \(version)") }
         if let category = issue.category?.name { lines.append("Category: \(category)") }
         if let parent = issue.parent { lines.append("Parent: #\(parent.id)") }
+        if issue.isPrivate == true { lines.append("Private: yes (issue visible only to members allowed to see private issues)") }
 
         // Due date warning (non-closed issues only)
         if let dueDateStr = issue.dueDate, issue.closedOn == nil {
@@ -164,8 +165,15 @@ enum ResponseFormatter {
                 lines.append("")
                 lines.append("## Attachments")
                 for att in attachments {
-                    lines.append("- \(att.filename ?? "file") (\(att.filesize ?? 0) bytes)")
+                    var line = "- #\(att.id) \(att.filename ?? "file") (\(att.contentType ?? "unknown type"), \(formatBytes(Int64(att.filesize ?? 0))))"
+                    var meta: [String] = []
+                    if let author = att.author?.name { meta.append(author) }
+                    if let created = att.createdOn { meta.append(created) }
+                    if !meta.isEmpty { line += " — " + meta.joined(separator: ", ") }
+                    if let desc = att.description, !desc.isEmpty { line += " — \"\(desc.sanitized)\"" }
+                    lines.append(line)
                 }
+                lines.append("Use download_attachments to save files locally (e.g. to view screenshots); update_attachment / delete_attachment take these IDs.")
             }
         }
 
@@ -210,13 +218,24 @@ enum ResponseFormatter {
                     let user = journal.user?.name ?? "Unknown"
                     let date = journal.createdOn ?? ""
                     lines.append("")
-                    lines.append("### \(user) — \(date)")
+                    let privacy = journal.privateNotes == true ? ", private" : ""
+                    lines.append("### \(user) — \(date) (#\(journal.id)\(privacy))")
                     if let notes = journal.notes, !notes.isEmpty {
                         lines.append(notes)
                     }
                     if let details = journal.details {
                         for detail in details {
                             if detail.name == "checklist" { continue } // Already shown above
+                            // Attachment details carry the attachment id as `name`
+                            if detail.property == "attachment" {
+                                let id = detail.name ?? "?"
+                                if let added = detail.newValue?.asString {
+                                    lines.append("  Attached #\(id): \(added)")
+                                } else {
+                                    lines.append("  Removed attachment #\(id): \(detail.oldValue?.asString ?? "?")")
+                                }
+                                continue
+                            }
                             let old = detail.oldValue?.asString ?? "(none)"
                             let new = detail.newValue?.asString ?? "(none)"
                             lines.append("  Changed \(detail.name ?? "field"): \(old) → \(new)")
@@ -227,6 +246,13 @@ enum ResponseFormatter {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    static func formatBytes(_ bytes: Int64) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        let kb = Double(bytes) / 1024
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        return String(format: "%.1f MB", kb / 1024)
     }
 
     // MARK: - Issue Tree

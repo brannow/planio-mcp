@@ -36,6 +36,10 @@ await server.withMethodHandler(CallTool.self) { params in
              "delete_issue", "add_watcher", "remove_watcher", "bulk_get_issues":
             return try await IssueTools.handle(params, client: planioClient, server: server, features: features)
 
+        // Attachments
+        case "download_attachments", "upload_attachments", "update_attachment", "delete_attachment":
+            return try await AttachmentTools.handle(params, client: planioClient)
+
         // Time Entries
         case "list_time_entries", "get_time_entry", "create_time_entry",
              "update_time_entry", "delete_time_entry":

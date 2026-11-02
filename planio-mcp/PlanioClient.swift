@@ -99,6 +99,15 @@ actor PlanioClient {
         return (status, data)
     }
 
+    func patch(path: String, body: [String: Any]) async throws -> (Int, Data) {
+        let (status, data) = try await request(method: "PATCH", path: path, body: body)
+        guard (200...299).contains(status) else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw ToolError.apiError(status, errorBody)
+        }
+        return (status, data)
+    }
+
     func delete(path: String) async throws -> Int {
         let (status, data) = try await request(method: "DELETE", path: path)
         guard (200...299).contains(status) else {
@@ -106,6 +115,64 @@ actor PlanioClient {
             throw ToolError.apiError(status, errorBody)
         }
         return status
+    }
+
+    // MARK: - File Transfer
+    // Kept apart from request(): that one forces a ".json" suffix and a JSON
+    // Content-Type, which break the binary upload (406) and the download route.
+
+    /// Step 1 of attaching a file: POST raw bytes to /uploads.json, streamed from disk.
+    /// Returns the upload id (= the attachment id once attached) and the token
+    /// that is passed in `uploads[]` of an issue create/update.
+    func uploadFile(at fileURL: URL, filename: String) async throws -> (id: Int?, token: String) {
+        var components = URLComponents(string: baseURL + "/uploads.json")!
+        components.queryItems = [URLQueryItem(name: "filename", value: filename)]
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "X-Redmine-API-Key")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await session.upload(for: request, fromFile: fileURL)
+        let status = (response as! HTTPURLResponse).statusCode
+        guard (200...299).contains(status) else {
+            // 422 carries Redmine's message, e.g. "exceeds the maximum allowed file size"
+            throw ToolError.apiError(status, String(data: data, encoding: .utf8) ?? "Unknown error")
+        }
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let upload = json["upload"] as? [String: Any],
+              let token = upload["token"] as? String else {
+            throw ToolError.apiError(status, "Unexpected upload response: \(String(data: data, encoding: .utf8) ?? "")")
+        }
+        return (upload["id"] as? Int, token)
+    }
+
+    /// Download an attachment's file to `destination` (overwritten if present).
+    /// The URL is built from baseURL instead of trusting `content_url`, so the API key
+    /// never leaves the configured host and filenames with spaces need no encoding.
+    /// Redirects are NOT followed: without access Redmine answers 302 -> /login, and
+    /// following it would silently save the HTML login page as the "file".
+    func downloadAttachment(id: Int, to destination: URL) async throws -> (bytes: Int64, contentType: String?) {
+        var request = URLRequest(url: URL(string: baseURL + "/attachments/download/\(id)")!)
+        request.setValue(apiKey, forHTTPHeaderField: "X-Redmine-API-Key")
+
+        let (tempURL, response) = try await session.download(for: request, delegate: NoRedirectDelegate())
+        let http = response as! HTTPURLResponse
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        guard http.statusCode == 200 else {
+            if (300...399).contains(http.statusCode) {
+                throw ToolError.apiError(http.statusCode, "redirected to \(http.value(forHTTPHeaderField: "Location") ?? "?") — no access to this attachment (or invalid API key)")
+            }
+            let body = (try? String(contentsOf: tempURL, encoding: .utf8)) ?? ""
+            throw ToolError.apiError(http.statusCode, String(body.prefix(300)))
+        }
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        try fm.moveItem(at: tempURL, to: destination)
+        let size = (try? fm.attributesOfItem(atPath: destination.path)[.size] as? Int64) ?? -1
+        return (size, http.value(forHTTPHeaderField: "Content-Type"))
     }
 
     // MARK: - Issue Cache
@@ -125,6 +192,13 @@ actor PlanioClient {
 
     func invalidateIssueCache(id: Int) {
         issueCache.removeValue(forKey: id)
+    }
+
+    /// Attachment PATCH/DELETE responses don't tell which issue the attachment
+    /// belongs to, so after those we drop the whole cache rather than serve a
+    /// stale attachment list from get_issue.
+    func invalidateAllIssueCaches() {
+        issueCache.removeAll()
     }
 
     // MARK: - Metadata (cached)
@@ -270,5 +344,20 @@ actor PlanioClient {
             }
         }
         return results
+    }
+}
+
+/// Makes URLSession hand back 3xx responses instead of following them.
+/// Completion-handler variant on purpose: the `async` overload crashes the
+/// Swift 6.4.2 compiler (SILGen, emitNativeToForeignThunk) in this project.
+final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping @Sendable (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }

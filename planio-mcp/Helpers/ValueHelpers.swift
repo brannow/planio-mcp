@@ -123,11 +123,13 @@ extension String {
 enum ToolError: LocalizedError {
     case missingParam(String)
     case apiError(Int, String)
+    case invalid(String)
 
     var errorDescription: String? {
         switch self {
         case .missingParam(let name): return "Missing required parameter: \(name)"
         case .apiError(let code, let msg): return "API error (\(code)): \(msg)"
+        case .invalid(let msg): return msg
         }
     }
 }

@@ -12,6 +12,8 @@ enum ToolDefinitions {
             updateIssue(features: features),
             deleteIssue,
             addWatcher, removeWatcher,
+            // Attachments
+            downloadAttachments, uploadAttachments, updateAttachment, deleteAttachment,
             // Time Entries
             listTimeEntries, getTimeEntry, createTimeEntry, updateTimeEntry, deleteTimeEntry,
             // Projects
@@ -189,6 +191,7 @@ enum ToolDefinitions {
             "done_ratio": prop("integer", "Completion percentage (0-100)"),
             "is_private": prop("boolean", "Whether the issue is private"),
             "notes": prop("string", "Add a comment to the issue journal"),
+            "private_notes": prop("boolean", "Make the comment in 'notes' private (only visible to users allowed to view private notes). Requires notes. If combined with field changes, Redmine splits it into two journal entries: a PUBLIC one with the field changes and a PRIVATE one with the comment. Existing comments cannot be switched between private/public via the API."),
             "custom_fields": .object(["type": .string("array"), "description": .string("Array of {id, value} objects")])
         ]
         var desc = "Update an existing issue. Only send the fields you want to change. Tracker, status, priority, category, version, and assignee accept names — the server resolves them."
@@ -223,6 +226,79 @@ enum ToolDefinitions {
             "required": .array([.string("issue_id")]),
             "properties": .object([
                 "issue_id": prop("integer", "The issue ID to delete")
+            ])
+        ]),
+        annotations: destructive
+    )
+
+    // MARK: - Attachments
+
+    static let downloadAttachments = Tool(
+        name: "download_attachments",
+        description: "Download files attached to an issue (e.g. client screenshots) to local disk and return their absolute paths. Then open them with your own file Read tool — images render there. Attachment IDs are listed in get_issue under Attachments. Omit attachment_ids to download all attachments of the issue. Files are saved as '<attachment_id>_<filename>'.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("issue_id")]),
+            "properties": .object([
+                "issue_id": prop("integer", "The issue the attachments belong to"),
+                "attachment_ids": .object(["type": .string("array"), "items": .object(["type": .string("integer")]), "description": .string("Only these attachments (IDs from get_issue). Default: all.")]),
+                "target_dir": prop("string", "Absolute directory to save into, created if missing (pass your scratchpad/working dir if you have one). Default: $TMPDIR/planio-mcp/<issue_id>/")
+            ])
+        ]),
+        annotations: .init(readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true)
+    )
+
+    static let uploadAttachments = Tool(
+        name: "upload_attachments",
+        description: "Attach local files to an existing issue. All files are added in one journal entry, optionally with a comment (notes). To attach while creating an issue, create it first, then call this. Max file size is set by the Planio instance; oversize files fail with a clear error.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("issue_id"), .string("files")]),
+            "properties": .object([
+                "issue_id": prop("integer", "The issue to attach to"),
+                "files": .object([
+                    "type": .string("array"),
+                    "description": .string("Files to attach: [{path: absolute local path (required), filename: name shown in Planio (default: local name), description: short text}]"),
+                    "items": .object([
+                        "type": .string("object"),
+                        "required": .array([.string("path")]),
+                        "properties": .object([
+                            "path": prop("string", "Absolute local file path"),
+                            "filename": prop("string", "Filename shown in Planio"),
+                            "description": prop("string", "Description shown next to the file")
+                        ])
+                    ])
+                ]),
+                "notes": prop("string", "Optional comment added with the upload"),
+                "private_notes": prop("boolean", "Make the comment private (requires notes). The files themselves are visible to everyone who can see the issue.")
+            ])
+        ]),
+        annotations: create
+    )
+
+    static let updateAttachment = Tool(
+        name: "update_attachment",
+        description: "Rename an attachment and/or change its description. The file content cannot be replaced — upload a new file and delete the old one instead.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("attachment_id")]),
+            "properties": .object([
+                "attachment_id": prop("integer", "Attachment ID (from get_issue)"),
+                "filename": prop("string", "New filename"),
+                "description": prop("string", "New description (empty string clears it)")
+            ])
+        ]),
+        annotations: update
+    )
+
+    static let deleteAttachment = Tool(
+        name: "delete_attachment",
+        description: "Permanently delete an attachment from its issue. This cannot be undone.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("attachment_id")]),
+            "properties": .object([
+                "attachment_id": prop("integer", "Attachment ID (from get_issue)")
             ])
         ]),
         annotations: destructive

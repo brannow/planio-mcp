@@ -77,13 +77,25 @@ npx @modelcontextprotocol/inspector /absolute/path/to/planio-mcp
 | Tool | Description |
 |------|-------------|
 | `list_issues` | Filter by project (ID or identifier), status, assignee, tracker, dates, custom fields. Tracker and version accept names. |
-| `get_issue` | Full details with section filtering (`sections` param). Includes due date warnings for overdue issues. |
+| `get_issue` | Full details with section filtering (`sections` param). Includes due date warnings for overdue issues. Shows attachment IDs and journal IDs with private markers. |
+| `get_issue_tree` | Epic/parent with all nested sub-issues, status, assignee and time rollups in ~2 API calls. |
 | `bulk_get_issues` | Fetch multiple issues in parallel with progress notifications. Same filtering as `get_issue`. |
 | `create_issue` | Create with all fields. Tracker, status, priority, category, version, and assignee accept names — the server resolves them. |
-| `update_issue` | Update fields, add comments (`notes`), manage checklists. Same name resolution as create. |
+| `update_issue` | Update fields, add comments (`notes`, optionally `private_notes`), manage checklists. Same name resolution as create. |
 | `delete_issue` | Permanently delete |
 | `add_watcher` | Add watcher to issue |
 | `remove_watcher` | Remove watcher from issue |
+
+### Attachments
+
+| Tool | Description |
+|------|-------------|
+| `download_attachments` | Save issue attachments (e.g. client screenshots) to local disk and return the paths, so the agent can open them with its own file reader. Default dir: `$TMPDIR/planio-mcp/<issue_id>/`. |
+| `upload_attachments` | Attach local files to an issue in one journal entry, optionally with a (private) comment. Orphaned uploads are cleaned up if attaching fails. |
+| `update_attachment` | Rename / change description (file content can't be replaced) |
+| `delete_attachment` | Permanently delete an attachment |
+
+**Private notes:** a comment can be created private (`private_notes`), but switching an existing comment between private/public is not possible — Planio answers `PUT /journals/:id` with 403 for API keys. A private note sent together with field changes is split by Redmine into a public entry (field changes) and a private one (comment).
 
 ### Time Entries
 
@@ -191,6 +203,7 @@ planio-mcp/
 ├── Tools/
 │   ├── ToolDefinitions.swift  # JSON Schema definitions (feature-aware)
 │   ├── IssueTools.swift       # CRUD + watchers + name resolution
+│   ├── AttachmentTools.swift  # Download to disk, upload + attach, rename, delete
 │   ├── TimeEntryTools.swift   # CRUD + activity resolution + time budget
 │   ├── ProjectTools.swift
 │   ├── UserTools.swift
