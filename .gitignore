@@ -4,3 +4,4 @@ old_test/
 xcuserdata/
 .claude/settings.local.json
 docs/
+build/

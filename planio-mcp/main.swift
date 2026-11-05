@@ -8,6 +8,12 @@
 import Foundation
 import MCP
 
+// Handled before Config.load() so it works without TICKET_URL/TICKET_KEY
+if CommandLine.arguments.contains("--version") {
+    print(appVersion)
+    exit(0)
+}
+
 // Load configuration
 let config = try Config.load()
 let features = config.features
@@ -16,7 +22,7 @@ let planioClient = PlanioClient(baseURL: config.baseURL, apiKey: config.apiKey)
 // Create MCP server
 let server = Server(
     name: "planio-mcp",
-    version: "1.0.0",
+    version: appVersion,
     capabilities: .init(
         tools: .init(listChanged: false)
     )

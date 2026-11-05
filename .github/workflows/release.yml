@@ -1,0 +1,96 @@
+name: Release
+
+# Tag push (vX.Y.Z) -> build, verify, publish GitHub release.
+# Manual run (workflow_dispatch) -> same build + checks, binary only as workflow artifact (no release).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # gh release create
+
+jobs:
+  release:
+    # Xcode 27 / Swift 6.4 is required: swift-collections >= 1.7.5 declares swift-tools-version 6.4,
+    # and it is the toolchain the code is developed and tested with. The xcode-27 image is a public
+    # preview; if it misbehaves, re-run (or fall back to macos-26 + pinning swift-collections to 1.7.0).
+    runs-on: xcode-27
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      BIN: build/Build/Products/Release/planio-mcp
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: xcodebuild -version
+
+      - name: Build
+        # CODE_SIGNING_ALLOWED=NO: runner has no certs for the project's DEVELOPMENT_TEAM.
+        # -onlyUsePackageVersionsFromResolvedFile: build exactly what Package.resolved pins.
+        run: |
+          xcodebuild build \
+            -project planio-mcp.xcodeproj -scheme planio-mcp -configuration Release \
+            -derivedDataPath build -onlyUsePackageVersionsFromResolvedFile \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO
+
+      - name: Ad-hoc sign
+        # arm64 binaries must carry a signature to run; ad-hoc needs no identity.
+        run: |
+          codesign --force --options runtime --sign - "$BIN"
+          codesign --verify --verbose "$BIN"
+          lipo -archs "$BIN"
+
+      - name: Check version
+        id: version
+        run: |
+          version=$("$BIN" --version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match appVersion $version (planio-mcp/Version.swift)"
+            exit 1
+          fi
+
+      - name: Smoke test (initialize + tools/list)
+        # The server doesn't exit on stdin EOF (board #1093), so run it in the background and kill it.
+        env:
+          TICKET_URL: https://example.invalid
+          TICKET_KEY: dummy
+        run: |
+          {
+            echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+            echo '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+            sleep 5
+          } | "$BIN" > out.jsonl &
+          pid=$!
+          sleep 7
+          kill "$pid" 2>/dev/null || true
+          cat out.jsonl
+          grep -q '"get_issue"' out.jsonl
+
+      - name: Package
+        id: pkg
+        run: |
+          # No version in the name: keeps releases/latest/download/<name>.tar.gz a stable install URL
+          name="planio-mcp-macos-arm64"
+          mkdir dist
+          # tar keeps the executable bit (a bare binary download would lose it)
+          cp "$BIN" LICENSE dist/ && tar -czf "dist/$name.tar.gz" -C dist planio-mcp LICENSE && rm dist/planio-mcp dist/LICENSE
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: dist/*
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
