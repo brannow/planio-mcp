@@ -22,10 +22,18 @@ actor PlanioClient {
     struct ProjectMetadata {
         let trackers: [IdName]
         let categories: [IdName]
-        let versions: [IdName]
+        let versions: [IdName]       // all, for display (incl. closed and shared)
+        let openVersions: [IdName]   // assignable ones, for name resolution
         let activities: [IdName]
     }
-    private var projectMetadata: [Int: (data: ProjectMetadata, fetchedAt: Date)] = [:]
+    // Keyed by the project reference as given (numeric ID or identifier) —
+    // Redmine accepts both in /projects/:id, so identifiers need no extra lookup.
+    private var projectMetadata: [String: (data: ProjectMetadata, fetchedAt: Date)] = [:]
+
+    // Per-project assignable members. Used for name -> user ID resolution because
+    // GET /users is admin-only (403 for normal API keys) while memberships are
+    // readable by every project member.
+    private var projectMembers: [String: (data: [ProjectMember], fetchedAt: Date)] = [:]
 
     init(baseURL: String, apiKey: String) {
         self.baseURL = baseURL
@@ -194,6 +202,15 @@ actor PlanioClient {
         issueCache.removeValue(forKey: id)
     }
 
+    /// Drop a cached issue whose updated_on no longer matches what a fresh
+    /// list response reports, so feeds never miss journals added in the last
+    /// cache-TTL minutes.
+    func invalidateIfStale(id: Int, updatedOn: String?) {
+        guard let entry = issueCache[id], let updatedOn else { return }
+        let cached = try? decoder.decode(IssueResponse.self, from: entry.data).issue.updatedOn
+        if cached != updatedOn { issueCache.removeValue(forKey: id) }
+    }
+
     /// Attachment PATCH/DELETE responses don't tell which issue the attachment
     /// belongs to, so after those we drop the whole cache rather than serve a
     /// stale attachment list from get_issue.
@@ -230,23 +247,54 @@ actor PlanioClient {
         return response.trackers
     }
 
-    func getProjectMetadata(projectId: Int) async throws -> ProjectMetadata {
-        if let cached = projectMetadata[projectId], Date().timeIntervalSince(cached.fetchedAt) <= cacheTTL {
+    func getProjectMetadata(project: String) async throws -> ProjectMetadata {
+        if let cached = projectMetadata[project], Date().timeIntervalSince(cached.fetchedAt) <= cacheTTL {
             return cached.data
         }
         let response: ProjectResponse = try await get(
-            path: "/projects/\(projectId)",
-            queryParams: ["include": "trackers,issue_categories,time_entry_activities,versions"]
+            path: "/projects/\(project)",
+            queryParams: ["include": "trackers,issue_categories,time_entry_activities"]
         )
-        let project = response.project
+        let info = response.project
+        // Best effort: a failing versions call must not break tracker/category/activity resolution
+        let versions: VersionsResponse = (try? await get(path: "/projects/\(project)/versions")) ?? VersionsResponse(versions: [])
         let meta = ProjectMetadata(
-            trackers: project.trackers ?? [],
-            categories: project.issueCategories ?? [],
-            versions: project.versions ?? [],
-            activities: project.timeEntryActivities ?? []
+            trackers: info.trackers ?? [],
+            categories: info.issueCategories ?? [],
+            versions: versions.versions.map { IdName(id: $0.id, name: $0.name) },
+            openVersions: versions.versions.filter { $0.status == "open" }.map { IdName(id: $0.id, name: $0.name) },
+            activities: info.timeEntryActivities ?? []
         )
-        projectMetadata[projectId] = (data: meta, fetchedAt: Date())
+        projectMetadata[project] = (data: meta, fetchedAt: Date())
         return meta
+    }
+
+    /// All users and groups that are members of a project (paginated, cached).
+    func getProjectMembers(project: String) async throws -> [ProjectMember] {
+        if let cached = projectMembers[project], Date().timeIntervalSince(cached.fetchedAt) <= cacheTTL {
+            return cached.data
+        }
+        var members: [ProjectMember] = []
+        var seen = Set<Int>()
+        var offset = 0
+        while true {
+            let response: MembershipsResponse = try await get(
+                path: "/projects/\(project)/memberships",
+                queryParams: ["limit": "100", "offset": String(offset)]
+            )
+            for m in response.memberships {
+                // A user can appear twice (direct + via group) — keep one entry
+                if let u = m.user, let name = u.name, seen.insert(u.id).inserted {
+                    members.append(ProjectMember(id: u.id, name: name, isGroup: false))
+                } else if let g = m.group, let name = g.name, seen.insert(g.id).inserted {
+                    members.append(ProjectMember(id: g.id, name: name, isGroup: true))
+                }
+            }
+            offset += response.memberships.count
+            if response.memberships.isEmpty || offset >= response.totalCount { break }
+        }
+        projectMembers[project] = (data: members, fetchedAt: Date())
+        return members
     }
 
     func searchUsers(name: String) async throws -> [User] {

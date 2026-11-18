@@ -53,7 +53,7 @@ Test without a client: `npx @modelcontextprotocol/inspector /usr/local/bin/plani
 
 | Area | Tools |
 |------|-------|
-| Issues | `list_issues`, `get_issue`, `get_issue_tree` (epic + sub-issues + time rollups), `bulk_get_issues`, `create_issue`, `update_issue` (fields, comments, private notes, checklists), `delete_issue`, `add_watcher`, `remove_watcher` |
+| Issues | `list_issues` (filters + text search), `get_issue`, `get_changes` (what changed since a date, one block per ticket), `get_issue_tree` (epic + sub-issues + time rollups), `bulk_get_issues`, `create_issue`, `update_issue` (fields, comments, private notes, checklists), `delete_issue`, `add_watcher`, `remove_watcher` |
 | Attachments | `download_attachments` (to `$TMPDIR/planio-mcp/<issue>/`), `upload_attachments`, `update_attachment`, `delete_attachment` |
 | Time entries | `list_time_entries` (defaults to you, auto-paginates up to 500), `get_time_entry`, `create_time_entry`, `update_time_entry`, `delete_time_entry` |
 | Projects & users | `list_projects`, `get_current_user`, `list_users` |

@@ -118,6 +118,10 @@ enum ActivityTools {
             logByDate[date, default: [:]][issueId] = log
         }
 
+        // ID -> name maps for status/assignee/version changes in the journals
+        let decodedIssues = issueDetails.values.compactMap { try? decoder.decode(IssueResponse.self, from: $0).issue }
+        let lookup = await NameLookup.build(for: decodedIssues, client: client)
+
         // Add journal entries by user
         for (issueId, data) in issueDetails {
             guard let issueResponse = try? decoder.decode(IssueResponse.self, from: data) else { continue }
@@ -138,22 +142,13 @@ enum ActivityTools {
                     let preview = String(clean.prefix(120))
                     log.actions.append("Comment: \(preview)\(clean.count > 120 ? "..." : "")")
                 }
-                if let details = journal.details {
-                    for detail in details {
-                        switch detail.name {
-                        case "status_id":
-                            log.actions.append("Status: \(detail.oldValue?.asString ?? "?") → \(detail.newValue?.asString ?? "?")")
-                        case "assigned_to_id":
-                            log.actions.append("Reassigned")
-                        case "checklist" where features.checklists:
-                            log.actions.append("Checklist updated")
-                        case "done_ratio":
-                            log.actions.append("Progress: \(detail.oldValue?.asString ?? "?")% → \(detail.newValue?.asString ?? "?")%")
-                        case .some(let name) where name != "checklist":
-                            log.actions.append("\(name) changed")
-                        default:
-                            break
-                        }
+                for detail in journal.details ?? [] {
+                    if detail.name == "checklist" {
+                        if features.checklists { log.actions.append("Checklist updated") }
+                        continue
+                    }
+                    if let line = JournalRenderer.describe(detail, issue: issue, lookup: lookup, diffLines: nil).first {
+                        log.actions.append(line)
                     }
                 }
 

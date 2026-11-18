@@ -59,6 +59,10 @@ await server.withMethodHandler(CallTool.self) { params in
         case "get_current_user", "list_users":
             return try await UserTools.handle(params, client: planioClient)
 
+        // Change feed
+        case "get_changes":
+            return try await ChangeTools.handle(params, client: planioClient, server: server)
+
         // Activity
         case "get_activity":
             return try await ActivityTools.handle(params, client: planioClient, server: server, features: features)

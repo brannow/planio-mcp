@@ -78,7 +78,7 @@ enum TimeEntryTools {
         guard let activityRaw = p.optionalStringOrInt("activity_id") else {
             return .init(content: [.text("Missing required parameter: activity_id")], isError: true)
         }
-        let activityId = try await NameResolver.resolve(activityRaw, field: .activity, projectId: resolvedProjectId, client: client)
+        let activityId = try await NameResolver.resolve(activityRaw, field: .activity, project: resolvedProjectId.map(String.init), client: client)
 
         var entryData: [String: Any] = [
             "hours": hours,
@@ -133,8 +133,8 @@ enum TimeEntryTools {
         if let hours = p.optionalDouble("hours") { entryData["hours"] = hours }
         // Resolve activity by name — use project_id if available for context
         if let activityRaw = p.optionalStringOrInt("activity_id") {
-            let projectIdInt = p.optionalStringOrInt("project_id").flatMap { Int($0) }
-            let activityId = try await NameResolver.resolve(activityRaw, field: .activity, projectId: projectIdInt, client: client)
+            let project = p.optionalStringOrInt("project_id")
+            let activityId = try await NameResolver.resolve(activityRaw, field: .activity, project: project, client: client)
             entryData["activity_id"] = activityId
         }
         if let issueId = p.optionalInt("issue_id") { entryData["issue_id"] = issueId }

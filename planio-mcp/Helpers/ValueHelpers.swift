@@ -133,3 +133,28 @@ enum ToolError: LocalizedError {
         }
     }
 }
+
+// MARK: - Dates
+
+enum DateText {
+    /// Journal/issue timestamps from Redmine are UTC ("2026-11-17T08:30:00Z"),
+    /// and filters compare them as strings. A since-value with an offset
+    /// ("2026-11-17T09:00:00+01:00") would compare wrong, so convert it to the
+    /// same UTC 'Z' form. Plain dates (YYYY-MM-DD) and unparseable input pass through.
+    static func normalizeSince(_ raw: String) -> String {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard s.count > 10 else { return s }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime]
+        var date = parser.date(from: s)
+        if date == nil {
+            parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            date = parser.date(from: s)
+        }
+        guard let date else { return s }
+        let out = ISO8601DateFormatter()
+        out.formatOptions = [.withInternetDateTime]
+        out.timeZone = TimeZone(identifier: "UTC")
+        return out.string(from: date)
+    }
+}

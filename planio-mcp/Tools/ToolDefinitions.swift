@@ -6,6 +6,7 @@ enum ToolDefinitions {
             // Issues
             listIssues,
             getIssue(features: features),
+            getChanges,
             getIssueTree,
             bulkGetIssues(features: features),
             createIssue(features: features),
@@ -59,19 +60,21 @@ enum ToolDefinitions {
 
     static let listIssues = Tool(
         name: "list_issues",
-        description: "List issues with filters (flat list). Returns open issues by default. Use status_id to include closed ('closed') or all ('*'). Use parent_id for direct sub-issues of one issue; for the full recursive hierarchy with time rollups use get_issue_tree instead.",
+        description: "Find issues: one compact row each (status, priority, subject, tracker, assignee, sprint, due, updated, closed). Text search with 'query' (subject, description and comments by default, narrow with search_in). Returns OPEN issues by default — pass status_id='*' to also search closed tickets, or status names like 'Feedback'. Use parent_id for direct sub-issues; for a full hierarchy with time rollups use get_issue_tree. For 'what changed since X' use get_changes instead.",
         inputSchema: .object([
             "type": .string("object"),
             "properties": .object([
-                "project_id": prop("string", "Project ID or identifier (e.g. 'my-project')"),
-                "status_id": prop("string", "Status filter: 'open' (default), 'closed', '*' (all)"),
-                "assigned_to_id": prop("string", "Filter by assignee: user ID or 'me'"),
+                "project_id": prop("string", "Project ID or identifier (e.g. 'my-project'). Also enables assignee names to resolve against the project members."),
+                "query": prop("string", "Text search, case-insensitive substring. Several words must ALL occur (in any searched field)."),
+                "search_in": prop("string", "Where 'query' searches: 'any' (default: subject, description and comments), 'subject', 'description', 'notes' (comments only)"),
+                "status_id": prop("string", "'open' (default), 'closed', '*' (all), or one or more status names/IDs separated by ',' or '|' (e.g. 'Feedback' or 'Feedback, In Bearbeitung')"),
+                "assigned_to_id": prop("string", "Assignee: 'me', a user ID, a name (needs project_id — matched against project members), '*' anyone, '!*' unassigned"),
                 "parent_id": prop("string", "Filter by parent issue: an issue ID returns its direct children, '!*' returns only top-level issues (no parent)"),
                 "tracker_id": prop("string", "Tracker name or ID (e.g. 'Bug', 'Feature')"),
                 "author_id": prop("integer", "Filter by author (creator) user ID"),
                 "fixed_version_id": prop("string", "Version/sprint name or ID"),
                 "sort": prop("string", "Sort field, e.g. 'updated_on:desc', 'priority:desc', 'due_date'"),
-                "created_on": prop("string", "Filter by creation date: >=YYYY-MM-DD, <=YYYY-MM-DD, or ><YYYY-MM-DD|YYYY-MM-DD (between)"),
+                "created_on": prop("string", "Filter by creation date: >=YYYY-MM-DD, <=YYYY-MM-DD, or ><YYYY-MM-DD|YYYY-MM-DD (between). Timestamps (YYYY-MM-DDTHH:MM:SSZ) work too."),
                 "updated_on": prop("string", "Filter by update date. Same syntax as created_on."),
                 "limit": prop("integer", "Max results (default 25, max 100)"),
                 "offset": prop("integer", "Pagination offset (default 0)")
@@ -80,23 +83,53 @@ enum ToolDefinitions {
         annotations: readOnly
     )
 
+    static let getChanges = Tool(
+        name: "get_changes",
+        description: "What happened since a point in time: one compact block per changed ticket (newest first) with new/closed markers, status/assignee/field changes (IDs shown as names, long text as '+x/-y lines') and shortened comments. Answers 'what happened since yesterday?' in one call instead of list_issues + bulk_get_issues + filtering. Then use get_issue with journals_since for the full text of a single ticket. Unlike get_activity (one user's work incl. booked time), this covers everybody's changes.",
+        inputSchema: .object([
+            "type": .string("object"),
+            "required": .array([.string("since")]),
+            "properties": .object([
+                "since": prop("string", "YYYY-MM-DD or ISO timestamp (e.g. 2026-11-17T08:00:00Z or with offset +01:00)"),
+                "project_id": prop("string", "Project ID or identifier — strongly recommended, otherwise all visible projects"),
+                "status_id": prop("string", "Only tickets currently in these statuses: names/IDs separated by ',', or 'open'/'closed'. Default: all"),
+                "assigned_to_id": prop("string", "Only tickets currently assigned to: 'me', user ID or name (name needs project_id)"),
+                "include_field_changes": prop("boolean", "Default true. false = only comments, status and assignee changes"),
+                "limit": prop("integer", "Max tickets (default 50, max 200). Each ticket costs one detail request unless cached.")
+            ])
+        ]),
+        annotations: readOnly
+    )
+
+    /// Shared guidance on output size: the defaults are generous, and agents that
+    /// don't know the knobs end up with 10 tickets = ~90k chars.
+    private static let outputSizeHelp = "Default output = everything: description, custom fields, attachments, watchers, children, relations and the last 10 journal entries incl. field changes. Keep it small with: sections='metadata' (header only: status, assignee, priority, version, updated, parent), sections='metadata,relations' (+ blocks/blocked-by), notes_only=true (comments only, no field-change entries), journals_since=<date> (only what is new). Field IDs in journals are shown as names; long text changes (e.g. description edits) as a line diff, not old+new in full."
+
+    private static let journalEditHelp = "Existing comments cannot be edited, deleted, restored or switched private/public via the API (Planio returns 403) — to correct one, add a new note."
+
+    private static func issueDetailProperties(bulk: Bool) -> [String: Value] {
+        [
+            "sections": prop("string", "Comma-separated sections to include: description, custom_fields, journals, children, attachments, relations, watchers, changesets, hours, dates. 'metadata' = header only. Omit for everything."),
+            "journals_limit": prop("integer", "Max journal entries\(bulk ? " per issue" : ""), newest first (default 10). Applied after notes_only/journals_since."),
+            "journals_since": prop("string", "Only journal entries at/after this date or timestamp (YYYY-MM-DD or ISO 8601)"),
+            "notes_only": prop("boolean", "Only journal entries with a comment; skip pure field changes (default false)")
+        ]
+    }
+
     static func getIssue(features: Features) -> Tool {
-        var desc = "Get issue details. Use 'sections' to control output — omit for everything, use 'metadata' for just core fields. For an issue's full sub-issue hierarchy with time rollups, use get_issue_tree instead."
+        var desc = "Get one issue. \(outputSizeHelp) For many issues use bulk_get_issues; for a sub-issue hierarchy with time rollups use get_issue_tree. \(journalEditHelp)"
         if features.checklists {
             desc += " Checklists are shown in the journals section — include 'journals' in sections to see checklist item IDs before modifying them."
         }
+        var props = issueDetailProperties(bulk: false)
+        props["issue_id"] = prop("integer", "The issue ID")
         return Tool(
             name: "get_issue",
             description: desc,
             inputSchema: .object([
                 "type": .string("object"),
                 "required": .array([.string("issue_id")]),
-                "properties": .object([
-                    "issue_id": prop("integer", "The issue ID"),
-                    "sections": prop("string", "Comma-separated sections to include: description, custom_fields, journals, children, attachments, relations, watchers, changesets, hours, dates. Use 'metadata' for core fields only. Omit for full output."),
-                    "journals_limit": prop("integer", "Max journal entries to return (default 10, from most recent)"),
-                    "journals_since": prop("string", "Only show journals after this date (YYYY-MM-DD)")
-                ])
+                "properties": .object(props)
             ]),
             annotations: readOnly
         )
@@ -116,22 +149,19 @@ enum ToolDefinitions {
     )
 
     static func bulkGetIssues(features: Features) -> Tool {
-        Tool(
+        var props = issueDetailProperties(bulk: true)
+        props["issue_ids"] = .object([
+            "type": .string("array"),
+            "items": .object(["type": .string("integer")]),
+            "description": .string("Array of issue IDs")
+        ])
+        return Tool(
             name: "bulk_get_issues",
-            description: "Get details for multiple issues at once. Same filtering as get_issue applies to all issues. Prefer this over multiple get_issue calls.",
+            description: "Get several issues in one call (parallel, cached); same options as get_issue, applied to each. Prefer this over repeated get_issue calls. Output grows fast with full defaults — for more than a few tickets pass sections and/or notes_only/journals_since. \(outputSizeHelp)",
             inputSchema: .object([
                 "type": .string("object"),
                 "required": .array([.string("issue_ids")]),
-                "properties": .object([
-                    "issue_ids": .object([
-                        "type": .string("array"),
-                        "items": .object(["type": .string("integer")]),
-                        "description": .string("Array of issue IDs")
-                    ]),
-                    "sections": prop("string", "Comma-separated sections to include (see get_issue). Omit for full output."),
-                    "journals_limit": prop("integer", "Max journal entries per issue (default 10)"),
-                    "journals_since": prop("string", "Only show journals after this date (YYYY-MM-DD)")
-                ])
+                "properties": .object(props)
             ]),
             annotations: readOnly
         )
@@ -144,7 +174,7 @@ enum ToolDefinitions {
             "tracker_id": prop("string", "Tracker name or ID (e.g. 'Bug', 'Feature')"),
             "status_id": prop("string", "Status name or ID (e.g. 'New', 'In Progress')"),
             "priority_id": prop("string", "Priority name or ID (e.g. 'Normal', 'High')"),
-            "assigned_to_id": prop("string", "Assignee name or user ID"),
+            "assigned_to_id": prop("string", "Assignee: user ID, 'me', or a name matched against the project members (e.g. 'Thomas' or 'Thomas Schöne')"),
             "parent_issue_id": prop("integer", "Parent issue ID (creates sub-task)"),
             "fixed_version_id": prop("string", "Version/sprint name or ID"),
             "category_id": prop("string", "Category name or ID"),
@@ -156,7 +186,7 @@ enum ToolDefinitions {
             "custom_fields": .object(["type": .string("array"), "description": .string("Array of {id, value} objects for custom fields")]),
             "watcher_user_ids": .object(["type": .string("array"), "description": .string("Array of user IDs to add as watchers")])
         ]
-        var desc = "Create a new issue. Tracker, status, priority, category, version, and assignee accept names (e.g. 'Bug', 'High') — the server resolves them. On mismatch, available options are returned."
+        var desc = "Create a new issue. Tracker, status, priority, category, version, and assignee accept names (e.g. 'Bug', 'High') — the server resolves them. On mismatch, available options are returned and nothing is created."
         if features.checklists {
             properties["checklists_attributes"] = .object(["type": .string("object"), "description": .string("Checklist items as object. Each key must be unique (use 'new_0', 'new_1', etc.). Values: {subject: string, is_done: bool, position: int}. position starts at 1.")])
             desc += " Supports checklists_attributes to add checklist items on creation."
@@ -180,7 +210,7 @@ enum ToolDefinitions {
             "tracker_id": prop("string", "Tracker name or ID (e.g. 'Bug', 'Feature')"),
             "status_id": prop("string", "Status name or ID (e.g. 'New', 'In Progress')"),
             "priority_id": prop("string", "Priority name or ID (e.g. 'Normal', 'High')"),
-            "assigned_to_id": prop("string", "Assignee name or user ID, or empty string to unassign"),
+            "assigned_to_id": prop("string", "Assignee: user ID, 'me', a name matched against the project members (e.g. 'Thomas' or 'Thomas Schöne'), or empty string to unassign"),
             "parent_issue_id": prop("integer", "New parent issue ID"),
             "fixed_version_id": prop("string", "Version/sprint name or ID"),
             "category_id": prop("string", "Category name or ID"),
@@ -191,10 +221,10 @@ enum ToolDefinitions {
             "done_ratio": prop("integer", "Completion percentage (0-100)"),
             "is_private": prop("boolean", "Whether the issue is private"),
             "notes": prop("string", "Add a comment to the issue journal"),
-            "private_notes": prop("boolean", "Make the comment in 'notes' private (only visible to users allowed to view private notes). Requires notes. If combined with field changes, Redmine splits it into two journal entries: a PUBLIC one with the field changes and a PRIVATE one with the comment. Existing comments cannot be switched between private/public via the API."),
+            "private_notes": prop("boolean", "Make the comment in 'notes' private (only visible to users allowed to view private notes). Requires notes. If combined with field changes, Redmine splits it into two journal entries: a PUBLIC one with the field changes and a PRIVATE one with the comment."),
             "custom_fields": .object(["type": .string("array"), "description": .string("Array of {id, value} objects")])
         ]
-        var desc = "Update an existing issue. Only send the fields you want to change. Tracker, status, priority, category, version, and assignee accept names — the server resolves them."
+        var desc = "Update an existing issue. Only send the fields you want to change. Tracker, status, priority, category, version, and assignee accept names — all are resolved BEFORE anything is sent; if one fails (or Planio rejects the update) nothing is written, the comment included, and the error says so. On success the issue is re-read and the result lists what actually changed, with ⚠ for fields Planio silently ignored (e.g. a status transition the workflow doesn't allow). \(journalEditHelp)"
         if features.checklists {
             properties["checklists_attributes"] = .object(["type": .string("object"), "description": .string("""
                 Checklist operations. First call get_issue with sections=journals to read current checklist item IDs. \
@@ -418,7 +448,7 @@ enum ToolDefinitions {
 
     static let listProjects = Tool(
         name: "list_projects",
-        description: "List all projects, or get full details for a single project. With project_id: returns trackers, issue categories, time entry activities, versions, and enabled modules.",
+        description: "List all projects, or get full details for a single project. With project_id: returns trackers, issue categories, time entry activities, and enabled modules.",
         inputSchema: .object([
             "type": .string("object"),
             "properties": .object([
@@ -461,7 +491,7 @@ enum ToolDefinitions {
 
     static let getActivity = Tool(
         name: "get_activity",
-        description: "Activity log for a user. Shows which tickets were touched in a date range, with actions (comments, status changes, field updates) and booked hours per day. Answers: 'What did I work on?', 'Show my activity last week'. Large date ranges (>2 weeks) may be slow — prefer shorter ranges and filter by project_id when possible.",
+        description: "Activity log for a user. Shows which tickets were touched in a date range, with actions (comments, status changes, field updates) and booked hours per day. Answers: 'What did I work on?', 'Show my activity last week'. For everybody's changes in a project use get_changes. Large date ranges (>2 weeks) may be slow — prefer shorter ranges and filter by project_id when possible.",
         inputSchema: .object([
             "type": .string("object"),
             "required": .array([.string("from")]),

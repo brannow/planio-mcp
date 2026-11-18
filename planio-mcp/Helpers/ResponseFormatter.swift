@@ -4,9 +4,12 @@ enum ResponseFormatter {
 
     // MARK: - Issues
 
-    static func formatIssueList(_ response: IssuesResponse) -> String {
+    static func formatIssueList(_ response: IssuesResponse, filters: String? = nil) -> String {
         var lines: [String] = []
         lines.append("Issues (\(response.totalCount) total, showing \(response.offset + 1)-\(response.offset + response.issues.count)):")
+        // Echo the effective filters: e.g. a text search on the default 'open'
+        // status silently misses closed tickets otherwise.
+        if let filters, !filters.isEmpty { lines.append("Filters: \(filters)") }
         lines.append("")
 
         for issue in response.issues {
@@ -38,6 +41,9 @@ enum ResponseFormatter {
                 meta.append("Due: \(due)")
             }
         }
+        // Dates on every row so "what moved recently" needs no detail fetch
+        if let updated = issue.updatedOn { meta.append("Updated: \(updated.prefix(10))") }
+        if let closed = issue.closedOn { meta.append("Closed: \(closed.prefix(10))") }
 
         var result = parts.joined(separator: " ")
         if !meta.isEmpty {
@@ -46,7 +52,7 @@ enum ResponseFormatter {
         return result
     }
 
-    static func formatIssueDetail(_ issue: Issue, features: Features = .default, filter: IssueFilterOptions = .default) -> String {
+    static func formatIssueDetail(_ issue: Issue, features: Features = .default, filter: IssueFilterOptions = .default, lookup: NameLookup = .empty) -> String {
         var lines: [String] = []
         lines.append("# Issue #\(issue.id): \(issue.subject ?? "No subject")")
         lines.append("")
@@ -62,6 +68,7 @@ enum ResponseFormatter {
         if let category = issue.category?.name { lines.append("Category: \(category)") }
         if let parent = issue.parent { lines.append("Parent: #\(parent.id)") }
         if issue.isPrivate == true { lines.append("Private: yes (issue visible only to members allowed to see private issues)") }
+        if let updated = issue.updatedOn { lines.append("Updated: \(updated)") }
 
         // Due date warning (non-closed issues only)
         if let dueDateStr = issue.dueDate, issue.closedOn == nil {
@@ -76,7 +83,6 @@ enum ResponseFormatter {
             if let due = issue.dueDate { lines.append("Due date: \(due)") }
             if let done = issue.doneRatio { lines.append("Done: \(done)%") }
             if let created = issue.createdOn { lines.append("Created: \(created)") }
-            if let updated = issue.updatedOn { lines.append("Updated: \(updated)") }
             if let closed = issue.closedOn { lines.append("Closed: \(closed)") }
         }
 
@@ -191,29 +197,32 @@ enum ResponseFormatter {
         // Journals
         if filter.shouldInclude("journals") {
             if let journals = issue.journals, !journals.isEmpty {
-                // Apply journals_since filter
+                // Filter order matters: notes_only and since BEFORE the limit,
+                // otherwise "last 10" could be 10 field-only entries that are
+                // then all filtered away.
                 var filtered = journals
-                if let since = filter.journalsSince {
-                    filtered = filtered.filter { journal in
-                        guard let date = journal.createdOn else { return false }
-                        // Compare date strings (works for both YYYY-MM-DD and ISO 8601)
-                        return date >= since
-                    }
+                if filter.notesOnly {
+                    filtered = filtered.filter { !($0.notes ?? "").isEmpty }
                 }
-
-                // Apply journals_limit (take last N)
+                if let since = filter.journalsSince {
+                    // String compare works for YYYY-MM-DD and ISO 8601 (both UTC 'Z')
+                    filtered = filtered.filter { ($0.createdOn ?? "") >= since }
+                }
                 let total = filtered.count
                 let limited = Array(filtered.suffix(filter.journalsLimit))
 
-                // Build header reflecting filtering
+                var qualifiers: [String] = []
+                if let since = filter.journalsSince { qualifiers.append("since \(since)") }
+                if filter.notesOnly { qualifiers.append("comments only") }
                 var header = "## Journal (last \(limited.count) of \(total) entries"
-                if let since = filter.journalsSince {
-                    header += ", since \(since)"
-                }
+                if !qualifiers.isEmpty { header += ", " + qualifiers.joined(separator: ", ") }
                 header += ")"
 
                 lines.append("")
                 lines.append(header)
+                if total > limited.count {
+                    lines.append("Older entries omitted — raise journals_limit or use journals_since to page back.")
+                }
                 for journal in limited {
                     let user = journal.user?.name ?? "Unknown"
                     let date = journal.createdOn ?? ""
@@ -223,22 +232,12 @@ enum ResponseFormatter {
                     if let notes = journal.notes, !notes.isEmpty {
                         lines.append(notes)
                     }
-                    if let details = journal.details {
-                        for detail in details {
-                            if detail.name == "checklist" { continue } // Already shown above
-                            // Attachment details carry the attachment id as `name`
-                            if detail.property == "attachment" {
-                                let id = detail.name ?? "?"
-                                if let added = detail.newValue?.asString {
-                                    lines.append("  Attached #\(id): \(added)")
-                                } else {
-                                    lines.append("  Removed attachment #\(id): \(detail.oldValue?.asString ?? "?")")
-                                }
-                                continue
-                            }
-                            let old = detail.oldValue?.asString ?? "(none)"
-                            let new = detail.newValue?.asString ?? "(none)"
-                            lines.append("  Changed \(detail.name ?? "field"): \(old) → \(new)")
+                    if filter.notesOnly { continue }
+                    for detail in journal.details ?? [] {
+                        if detail.name == "checklist" { continue } // Already shown above
+                        let rendered = JournalRenderer.describe(detail, issue: issue, lookup: lookup, diffLines: 30)
+                        for (idx, line) in rendered.enumerated() {
+                            lines.append(idx == 0 ? "  \(line)" : "      \(line)")
                         }
                     }
                 }
